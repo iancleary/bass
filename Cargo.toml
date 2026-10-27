@@ -1,0 +1,10 @@
+[package]
+name = "bass"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+description = "Command-line client for decision APIs (placeholder)"
+repository = "https://github.com/iancleary/bass"
+readme = "README.md"
+authors = ["Ian Cleary"]
