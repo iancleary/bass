@@ -32,13 +32,6 @@ fn flags() -> &'static [Flag] {
             ),
         },
         Flag {
-            name: "--request",
-            value: Some("PATH"),
-            summary: Summary::Fixed(
-                "Read the request document from PATH. Omit this flag to read standard input.",
-            ),
-        },
-        Flag {
             name: "--timeout-seconds",
             value: Some("N"),
             summary: Summary::Timeout,
@@ -57,21 +50,12 @@ fn flags() -> &'static [Flag] {
                 "Permit plain HTTP to one hostname. The token must be an OpenShell credential placeholder. This flag is not read from the environment.",
             ),
         },
-        Flag {
-            name: "--help",
-            value: None,
-            summary: Summary::Fixed("Write this text to standard output and exit 0."),
-        },
-        Flag {
-            name: "--version",
-            value: None,
-            summary: Summary::Fixed("Write the package version to standard output and exit 0."),
-        },
     ]
 }
 
 enum Command {
     Help,
+    DecideHelp,
     Version,
     Decide(Invocation),
 }
@@ -86,7 +70,7 @@ struct Invocation {
 
 enum RequestSource {
     Path(PathBuf),
-    Stdin,
+    StandardInput { explicit: bool },
 }
 
 enum UsageError {
@@ -99,13 +83,16 @@ enum UsageError {
     TokenEmpty,
     Endpoint(transport::EndpointError),
     RequestUnreadable,
-    StdinIsTerminal,
     HelpMixed,
     VersionMixed,
     InvalidConfigurationText,
     Environment(environment::FileError),
     CleartextNameInvalid,
     CleartextCredential,
+    SubcommandRequired,
+    UnknownCommand,
+    RequestAlreadyProvided,
+    OmittedRequestIsTerminal,
 }
 
 enum Failure {
@@ -147,7 +134,8 @@ fn exit_code(failure: &Failure) -> u8 {
 
 fn execute(args: &[String]) -> Result<Vec<u8>, Failure> {
     match parse_invocation(args) {
-        Ok(Command::Help) => Ok(help_text().into_bytes()),
+        Ok(Command::Help) => Ok(top_level_help().into_bytes()),
+        Ok(Command::DecideHelp) => Ok(decide_help().into_bytes()),
         Ok(Command::Version) => Ok(format!("bass {}\n", env!("CARGO_PKG_VERSION")).into_bytes()),
         Ok(Command::Decide(invocation)) => decide(invocation),
         Err(error) => Err(Failure::Usage(error)),
@@ -155,6 +143,13 @@ fn execute(args: &[String]) -> Result<Vec<u8>, Failure> {
 }
 
 fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
+    if matches!(
+        invocation.request,
+        RequestSource::StandardInput { explicit: false }
+    ) && std::io::stdin().is_terminal()
+    {
+        return Err(Failure::Usage(UsageError::OmittedRequestIsTerminal));
+    }
     let assignments = load_assignments(&invocation)?;
     let endpoint = resolve_endpoint(
         invocation.endpoint.as_deref(),
@@ -164,9 +159,6 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
     let token = resolve_token(&assignments)?;
     if endpoint.named_cleartext() && !token.is_credential_placeholder() {
         return Err(Failure::Usage(UsageError::CleartextCredential));
-    }
-    if matches!(invocation.request, RequestSource::Stdin) && std::io::stdin().is_terminal() {
-        return Err(Failure::Usage(UsageError::StdinIsTerminal));
     }
     let bytes = read_request(&invocation.request)?;
     let request = decision::parse_request(&bytes).map_err(Failure::Request)?;
@@ -181,17 +173,33 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
 }
 
 fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
+    if args.is_empty() {
+        return Err(UsageError::SubcommandRequired);
+    }
     if args.len() == 1 && args[0] == "--help" {
         return Ok(Command::Help);
     }
     if args.len() == 1 && args[0] == "--version" {
         return Ok(Command::Version);
     }
-    if args.iter().any(|arg| arg == "--help") {
+    if args[0] == "--help" {
         return Err(UsageError::HelpMixed);
     }
-    if args.iter().any(|arg| arg == "--version") {
+    if args[0] == "--version" {
         return Err(UsageError::VersionMixed);
+    }
+    if args[0] != "decide" {
+        return Err(UsageError::UnknownCommand);
+    }
+    parse_decide(&args[1..])
+}
+
+fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
+    if args.len() == 1 && args[0] == "--help" {
+        return Ok(Command::DecideHelp);
+    }
+    if args.iter().any(|argument| argument == "--help") {
+        return Err(UsageError::HelpMixed);
     }
 
     let mut endpoint = None;
@@ -199,66 +207,77 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
     let mut timeout = None;
     let mut environment_file = None;
     let mut cleartext_host = None;
+    let mut options_ended = false;
     let mut index = 0;
     while index < args.len() {
-        let name = &args[index];
-        if !name.starts_with("--") || name.contains('=') {
-            return Err(UsageError::UnknownArgument);
+        let argument = &args[index];
+        if !options_ended && argument == "--" {
+            options_ended = true;
+            index += 1;
+            continue;
         }
-        let flag = flags()
-            .iter()
-            .find(|flag| flag.name == name)
-            .ok_or(UsageError::UnknownArgument)?;
-        if flag.value.is_none() {
-            return Err(UsageError::UnknownArgument);
+        if !options_ended && argument.starts_with("--") {
+            if argument.contains('=') {
+                return Err(UsageError::UnknownArgument);
+            }
+            let flag = flags()
+                .iter()
+                .find(|flag| flag.name == argument)
+                .ok_or(UsageError::UnknownArgument)?;
+            let Some(value) = args.get(index + 1) else {
+                return Err(UsageError::MissingFlagValue);
+            };
+            if value.starts_with("--") {
+                return Err(UsageError::MissingFlagValue);
+            }
+            index += 2;
+            match flag.name {
+                "--endpoint" => {
+                    if endpoint.is_some() {
+                        return Err(UsageError::DuplicateFlag);
+                    }
+                    endpoint = Some(value.clone());
+                }
+                "--timeout-seconds" => {
+                    if timeout.is_some() {
+                        return Err(UsageError::DuplicateFlag);
+                    }
+                    timeout = Some(parse_timeout(value)?);
+                }
+                "--environment-file" => {
+                    if environment_file.is_some() {
+                        return Err(UsageError::DuplicateFlag);
+                    }
+                    environment_file = Some(PathBuf::from(value));
+                }
+                "--allow-cleartext-host" => {
+                    if cleartext_host.is_some() {
+                        return Err(UsageError::DuplicateFlag);
+                    }
+                    cleartext_host = Some(
+                        transport::normalize_hostname(value)
+                            .ok_or(UsageError::CleartextNameInvalid)?,
+                    );
+                }
+                _ => return Err(UsageError::UnknownArgument),
+            }
+            continue;
         }
-        let Some(value) = args.get(index + 1) else {
-            return Err(UsageError::MissingFlagValue);
+        let source = if argument == "-" {
+            RequestSource::StandardInput { explicit: true }
+        } else {
+            RequestSource::Path(PathBuf::from(argument))
         };
-        if value.starts_with("--") {
-            return Err(UsageError::MissingFlagValue);
+        if request.is_some() {
+            return Err(UsageError::RequestAlreadyProvided);
         }
-        index += 2;
-        match flag.name {
-            "--endpoint" => {
-                if endpoint.is_some() {
-                    return Err(UsageError::DuplicateFlag);
-                }
-                endpoint = Some(value.clone());
-            }
-            "--request" => {
-                if request.is_some() {
-                    return Err(UsageError::DuplicateFlag);
-                }
-                request = Some(RequestSource::Path(PathBuf::from(value)));
-            }
-            "--timeout-seconds" => {
-                if timeout.is_some() {
-                    return Err(UsageError::DuplicateFlag);
-                }
-                timeout = Some(parse_timeout(value)?);
-            }
-            "--environment-file" => {
-                if environment_file.is_some() {
-                    return Err(UsageError::DuplicateFlag);
-                }
-                environment_file = Some(PathBuf::from(value));
-            }
-            "--allow-cleartext-host" => {
-                if cleartext_host.is_some() {
-                    return Err(UsageError::DuplicateFlag);
-                }
-                cleartext_host = Some(
-                    transport::normalize_hostname(value).ok_or(UsageError::CleartextNameInvalid)?,
-                );
-            }
-            _ => return Err(UsageError::UnknownArgument),
-        }
+        request = Some(source);
+        index += 1;
     }
 
     Ok(Command::Decide(Invocation {
         endpoint,
-        request: request.unwrap_or(RequestSource::Stdin),
+        request: request.unwrap_or(RequestSource::StandardInput { explicit: false }),
         timeout: timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
         environment_file,
         cleartext_host,
@@ -274,21 +293,24 @@ fn parse_timeout(value: &str) -> Result<Duration, UsageError> {
     }
 }
 
-fn help_text() -> String {
-    let mut synopsis = String::from("bass");
-    for flag in flags() {
-        let Some(placeholder) = flag.value else {
-            continue;
-        };
-        synopsis.push_str(" [");
-        synopsis.push_str(flag.name);
-        synopsis.push(' ');
-        synopsis.push_str(placeholder);
-        synopsis.push(']');
-    }
+fn top_level_help() -> String {
+    "\
+bass decide [OPTIONS] [REQUEST]
+bass --help
+bass --version
 
+decide posts one decision request. Run bass decide --help for the options.
+--help writes this text to standard output and exits 0.
+--version writes the package version to standard output and exits 0.
+"
+    .to_string()
+}
+
+fn decide_help() -> String {
     let mut lines = vec![
-        synopsis,
+        "bass decide [OPTIONS] [REQUEST]".to_string(),
+        String::new(),
+        "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
         "BASS_TOKEN is the bearer token. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
         String::new(),
@@ -320,7 +342,7 @@ fn read_request(source: &RequestSource) -> Result<Vec<u8>, Failure> {
             };
             read_limited(file)
         }
-        RequestSource::Stdin => read_limited(std::io::stdin()),
+        RequestSource::StandardInput { .. } => read_limited(std::io::stdin()),
     };
     match result {
         Ok(bytes) => Ok(bytes),
@@ -363,8 +385,15 @@ impl std::fmt::Display for UsageError {
             UsageError::TokenEmpty => formatter.write_str("BASS_TOKEN is empty."),
             UsageError::Endpoint(error) => error.fmt(formatter),
             UsageError::RequestUnreadable => formatter.write_str("The request could not be read."),
-            UsageError::StdinIsTerminal => {
-                formatter.write_str("The request is read from a file or a pipe.")
+            UsageError::OmittedRequestIsTerminal => {
+                formatter.write_str("The request was omitted and standard input is a terminal.")
+            }
+            UsageError::SubcommandRequired => {
+                formatter.write_str("bass decide [OPTIONS] [REQUEST]\nA subcommand is required.")
+            }
+            UsageError::UnknownCommand => formatter.write_str("The subcommand was not recognized."),
+            UsageError::RequestAlreadyProvided => {
+                formatter.write_str("Only one request path is accepted.")
             }
             UsageError::HelpMixed => formatter.write_str("--help is a sole argument."),
             UsageError::VersionMixed => formatter.write_str("--version is a sole argument."),

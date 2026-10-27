@@ -1,6 +1,6 @@
 # bass
 
-`bass` posts one decision request and prints the decision.
+`bass decide` posts one decision request and prints the decision.
 
 The endpoint is a full URL you supply. No host is built into the program. The bearer token is `BASS_TOKEN`. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
 
@@ -9,20 +9,20 @@ The endpoint is a full URL you supply. No host is built into the program. The be
 Put the endpoint and the token in the environment file, then pass a request document.
 
 ```
-bass --request request.json
+bass decide request.json
 ```
 
 You can still pass the endpoint on the command line and export the token.
 
 ```
 export BASS_TOKEN="replace-with-the-token"
-bass --endpoint "https://example.invalid/decision" --request request.json
+bass decide --endpoint "https://example.invalid/decision" request.json
 ```
 
-Omit `--request` to read the document from a pipe.
+Omit the request path to read the document from a pipe. `bass` reads standard input only when it is not a terminal.
 
 ```
-generator | bass --endpoint "https://example.invalid/decision"
+generator | bass decide --endpoint "https://example.invalid/decision"
 ```
 
 `example.invalid` and `gateway.example` are documentation hosts. They are not services.
@@ -78,9 +78,11 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 ## Flags
 
-`bass --help` writes the flag list. `--help` and `--version` are sole arguments.
+`bass` with no subcommand writes usage and exits 2. `bass --help` names the subcommand. `bass --version` writes the package version. Both are sole arguments. `bass decide --help` writes the options for `decide`.
 
-`--endpoint URL` sets the decision URL for one invocation. `--request PATH` reads the document from a file. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` stops the exchange after N seconds. The default is 60. The maximum is 600.
+`REQUEST` is one optional positional argument. It is a file path, or `-` for standard input. When `REQUEST` is omitted, `bass` reads standard input if it is not a terminal. When standard input is a terminal, `bass` exits 2 and does not read it. A path that begins with a hyphen, other than a lone `-`, is written after `--`.
+
+`--endpoint URL` sets the decision URL for one invocation. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` stops the exchange after N seconds. The default is 60. The maximum is 600.
 
 `--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag.
 
@@ -115,7 +117,7 @@ BASS_TOKEN=replace-with-the-token
 ```
 
 ```
-bass --request request.json
+bass decide request.json
 ```
 
 On this side the default stays strict. A real token is not sent to a named host over cleartext, because that path requires the placeholder and rejects every other token before connecting.
@@ -126,9 +128,9 @@ The sandbox holds the placeholder token and the host-local relay URL. Run `bass`
 
 ```
 export BASS_TOKEN="openshell:resolve:env:EXAMPLE_TOKEN"
-bass --allow-cleartext-host host.openshell.internal \
+bass decide --allow-cleartext-host host.openshell.internal \
   --endpoint "http://host.openshell.internal:8080/decision" \
-  --request request.json
+  request.json
 ```
 
 The following statements about OpenShell were not verified from this repository. They are inferred from OpenShell documentation and the maintainer's existing profile. The OpenShell proxy substitutes the real credential only when its policy permits the binary, host, port, path, and method. A compromised sandbox therefore yields only the call that policy already allows. Adding `bass` to the allowed binaries adds no new class of access beyond the other binaries that policy already permits. Narrow the profile to the decision path and to POST only. That is a recommendation for the profile owner. `bass` does not enforce the profile.
