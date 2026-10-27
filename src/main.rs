@@ -51,6 +51,13 @@ fn flags() -> &'static [Flag] {
             ),
         },
         Flag {
+            name: "--allow-cleartext-host",
+            value: Some("NAME"),
+            summary: Summary::Fixed(
+                "Permit plain HTTP to one hostname. The token must be an OpenShell credential placeholder. This flag is not read from the environment.",
+            ),
+        },
+        Flag {
             name: "--help",
             value: None,
             summary: Summary::Fixed("Write this text to standard output and exit 0."),
@@ -70,10 +77,11 @@ enum Command {
 }
 
 struct Invocation {
-    endpoint: Option<transport::Endpoint>,
+    endpoint: Option<String>,
     request: RequestSource,
     timeout: Duration,
     environment_file: Option<PathBuf>,
+    cleartext_host: Option<String>,
 }
 
 enum RequestSource {
@@ -96,6 +104,8 @@ enum UsageError {
     VersionMixed,
     InvalidConfigurationText,
     Environment(environment::FileError),
+    CleartextNameInvalid,
+    CleartextCredential,
 }
 
 enum Failure {
@@ -146,8 +156,15 @@ fn execute(args: &[String]) -> Result<Vec<u8>, Failure> {
 
 fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
     let assignments = load_assignments(&invocation)?;
-    let endpoint = resolve_endpoint(invocation.endpoint, &assignments)?;
+    let endpoint = resolve_endpoint(
+        invocation.endpoint.as_deref(),
+        invocation.cleartext_host.as_deref(),
+        &assignments,
+    )?;
     let token = resolve_token(&assignments)?;
+    if endpoint.named_cleartext() && !token.is_credential_placeholder() {
+        return Err(Failure::Usage(UsageError::CleartextCredential));
+    }
     if matches!(invocation.request, RequestSource::Stdin) && std::io::stdin().is_terminal() {
         return Err(Failure::Usage(UsageError::StdinIsTerminal));
     }
@@ -181,6 +198,7 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
     let mut request = None;
     let mut timeout = None;
     let mut environment_file = None;
+    let mut cleartext_host = None;
     let mut index = 0;
     while index < args.len() {
         let name = &args[index];
@@ -206,7 +224,7 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
                 if endpoint.is_some() {
                     return Err(UsageError::DuplicateFlag);
                 }
-                endpoint = Some(transport::Endpoint::parse(value).map_err(UsageError::Endpoint)?);
+                endpoint = Some(value.clone());
             }
             "--request" => {
                 if request.is_some() {
@@ -226,6 +244,14 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
                 }
                 environment_file = Some(PathBuf::from(value));
             }
+            "--allow-cleartext-host" => {
+                if cleartext_host.is_some() {
+                    return Err(UsageError::DuplicateFlag);
+                }
+                cleartext_host = Some(
+                    transport::normalize_hostname(value).ok_or(UsageError::CleartextNameInvalid)?,
+                );
+            }
             _ => return Err(UsageError::UnknownArgument),
         }
     }
@@ -235,6 +261,7 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
         request: request.unwrap_or(RequestSource::Stdin),
         timeout: timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
         environment_file,
+        cleartext_host,
     }))
 }
 
@@ -345,6 +372,12 @@ impl std::fmt::Display for UsageError {
                 formatter.write_str("A configuration value is not valid text.")
             }
             UsageError::Environment(error) => error.fmt(formatter),
+            UsageError::CleartextNameInvalid => {
+                formatter.write_str("The cleartext host name is not valid.")
+            }
+            UsageError::CleartextCredential => formatter.write_str(
+                "Cleartext to a named host requires an OpenShell credential placeholder.",
+            ),
         }
     }
 }
@@ -396,21 +429,21 @@ fn configuration_directory(name: &str) -> Result<Option<String>, Failure> {
 }
 
 fn resolve_endpoint(
-    flag: Option<transport::Endpoint>,
+    flag: Option<&str>,
+    cleartext_host: Option<&str>,
     assignments: &environment::Assignments,
 ) -> Result<transport::Endpoint, Failure> {
-    if let Some(endpoint) = flag {
-        return Ok(endpoint);
-    }
-    if let Some(value) = process_value("BASS_ENDPOINT")? {
-        return transport::Endpoint::parse(&value)
-            .map_err(|error| Failure::Usage(UsageError::Endpoint(error)));
-    }
-    if let Some(value) = &assignments.endpoint {
-        return transport::Endpoint::parse(value)
-            .map_err(|error| Failure::Usage(UsageError::Endpoint(error)));
-    }
-    Err(Failure::Usage(UsageError::EndpointRequired))
+    let raw = if let Some(endpoint) = flag {
+        endpoint.to_string()
+    } else if let Some(value) = process_value("BASS_ENDPOINT")? {
+        value
+    } else if let Some(value) = &assignments.endpoint {
+        value.clone()
+    } else {
+        return Err(Failure::Usage(UsageError::EndpointRequired));
+    };
+    transport::Endpoint::parse(&raw, cleartext_host)
+        .map_err(|error| Failure::Usage(UsageError::Endpoint(error)))
 }
 
 fn resolve_token(assignments: &environment::Assignments) -> Result<transport::Token, Failure> {

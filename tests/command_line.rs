@@ -72,6 +72,7 @@ fn help_lists_the_flags_and_the_token_variable() {
         "--help",
         "--version",
         "--environment-file",
+        "--allow-cleartext-host",
         "BASS_TOKEN",
         "BASS_ENDPOINT",
     ] {
@@ -579,6 +580,163 @@ fn cleartext_endpoint_in_the_file_is_rejected() {
 }
 
 #[test]
+fn allowed_cleartext_host_accepts_a_credential_placeholder() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let port = address.port();
+    let mut command = bass(&[
+        "--allow-cleartext-host",
+        "HOST.OPENSHELL.INTERNAL.",
+        "--endpoint",
+        &format!("http://HOST.OPENSHELL.INTERNAL.:{port}/decision"),
+        "--timeout-seconds",
+        "5",
+    ]);
+    command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
+    command.env("LD_PRELOAD", named_host_resolver());
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!contains_bytes(&output.stdout, b"EXAMPLE_TOKEN"));
+    assert!(!contains_bytes(&output.stderr, b"EXAMPLE_TOKEN"));
+    assert!(!contains_bytes(&output.stdout, b"openshell:resolve:env:"));
+    let (headers, _) = split_http(&captured);
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer openshell:resolve:env:example_token"));
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("host: host.openshell.internal:"));
+    assert!(!headers
+        .to_ascii_lowercase()
+        .contains("host.openshell.internal."));
+}
+
+#[test]
+fn allowed_cleartext_host_rejects_a_real_token() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let mut command = bass(&[
+        "--allow-cleartext-host",
+        "host.openshell.internal",
+        "--endpoint",
+        &format!("http://host.openshell.internal:{port}/decision"),
+        "--timeout-seconds",
+        "5",
+    ]);
+    command.env("BASS_TOKEN", "live-gateway-token");
+    command.env("LD_PRELOAD", named_host_resolver());
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(
+        stderr,
+        "Cleartext to a named host requires an OpenShell credential placeholder.\n"
+    );
+    assert!(!stderr.contains("live-gateway-token"));
+    assert!(output.stdout.is_empty());
+    listener.set_nonblocking(true).expect("nonblocking");
+    match listener.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("expected no connection, got {other:?}"),
+    }
+}
+
+#[test]
+fn allowed_cleartext_host_rejects_a_missing_token() {
+    let output = output_of(&mut bass(&[
+        "--allow-cleartext-host",
+        "host.openshell.internal",
+        "--endpoint",
+        "http://host.openshell.internal/decision",
+    ]));
+    assert_eq!(status_code(&output), 2);
+    assert_eq!(output.stderr, b"BASS_TOKEN is missing.\n");
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn a_different_cleartext_host_is_rejected() {
+    let mut command = bass(&[
+        "--allow-cleartext-host",
+        "host.openshell.internal",
+        "--endpoint",
+        "http://host.openshell.internal.example/decision",
+    ]);
+    command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The cleartext host is not the allowed name.\n");
+    assert!(!stderr.contains("EXAMPLE_TOKEN"));
+}
+
+#[test]
+fn a_second_trailing_dot_does_not_match_the_allowed_host() {
+    let mut command = bass(&[
+        "--allow-cleartext-host",
+        "host.openshell.internal",
+        "--endpoint",
+        "http://host.openshell.internal../decision",
+    ]);
+    command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The cleartext host is not the allowed name.\n");
+    assert!(!stderr.contains("EXAMPLE_TOKEN"));
+}
+
+#[test]
+fn cleartext_host_allowance_is_not_read_from_the_environment() {
+    let mut command = bass(&["--endpoint", "http://host.openshell.internal/decision"]);
+    command.env("BASS_ALLOW_CLEARTEXT_HOST", "host.openshell.internal");
+    command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "Cleartext is limited to a loopback IP literal.\n");
+    assert!(!stderr.contains("EXAMPLE_TOKEN"));
+}
+
+#[test]
+fn cleartext_host_allowance_is_not_an_environment_file_key() {
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_ALLOW_CLEARTEXT_HOST=host.openshell.internal\nBASS_ENDPOINT=http://host.openshell.internal/decision\nBASS_TOKEN=openshell:resolve:env:EXAMPLE_TOKEN\n",
+        0o600,
+    );
+    let output = output_of(&mut command_in(&config, &[]));
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The environment file has an unknown key.\n");
+    assert!(!stderr.contains("EXAMPLE_TOKEN"));
+}
+
+#[test]
+fn an_address_is_not_a_cleartext_host_name() {
+    let output = output_of(&mut bass(&["--allow-cleartext-host", "10.0.0.1"]));
+    assert_eq!(status_code(&output), 2);
+    assert_eq!(output.stderr, b"The cleartext host name is not valid.\n");
+}
+
+#[test]
 fn token_flag_is_rejected_without_echoing_the_value() {
     let output = output_of(&mut bass(&["--token", "command-line-token"]));
     assert_eq!(status_code(&output), 2);
@@ -602,6 +760,32 @@ fn write_environment(config: &Path, body: &str, mode: u32) {
     let path = directory.join("environment");
     std::fs::write(&path, body).expect("write environment file");
     restrict_environment_file(&path, mode);
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn named_host_resolver() -> &'static str {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("bass-resolve-named-host-{}.so", std::process::id()));
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/resolve_named_host.c");
+        let status = Command::new("cc")
+            .args(["-shared", "-fPIC", "-o"])
+            .arg(&path)
+            .arg(&source)
+            .arg("-ldl")
+            .status()
+            .expect("compile named host resolver");
+        assert!(status.success(), "named host resolver compiled");
+        path.to_str().expect("resolver path").to_string()
+    })
+    .as_str()
 }
 
 fn restrict_environment_file(path: &Path, mode: u32) {
