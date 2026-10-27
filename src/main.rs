@@ -1,4 +1,5 @@
 mod decision;
+mod environment;
 mod transport;
 
 use std::io::{IsTerminal, Read, Write};
@@ -26,7 +27,9 @@ fn flags() -> &'static [Flag] {
         Flag {
             name: "--endpoint",
             value: Some("URL"),
-            summary: Summary::Fixed("Full decision URL supplied by the operator."),
+            summary: Summary::Fixed(
+                "Full decision URL. Overrides BASS_ENDPOINT from the process environment and the environment file.",
+            ),
         },
         Flag {
             name: "--request",
@@ -39,6 +42,13 @@ fn flags() -> &'static [Flag] {
             name: "--timeout-seconds",
             value: Some("N"),
             summary: Summary::Timeout,
+        },
+        Flag {
+            name: "--environment-file",
+            value: Some("PATH"),
+            summary: Summary::Fixed(
+                "Read assignments from PATH. Omit this flag to use the default environment file.",
+            ),
         },
         Flag {
             name: "--help",
@@ -60,9 +70,10 @@ enum Command {
 }
 
 struct Invocation {
-    endpoint: transport::Endpoint,
+    endpoint: Option<transport::Endpoint>,
     request: RequestSource,
     timeout: Duration,
+    environment_file: Option<PathBuf>,
 }
 
 enum RequestSource {
@@ -83,6 +94,8 @@ enum UsageError {
     StdinIsTerminal,
     HelpMixed,
     VersionMixed,
+    InvalidConfigurationText,
+    Environment(environment::FileError),
 }
 
 enum Failure {
@@ -132,27 +145,17 @@ fn execute(args: &[String]) -> Result<Vec<u8>, Failure> {
 }
 
 fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
-    let token = match transport::token_from_env(std::env::var("BASS_TOKEN").ok().as_deref()) {
-        Ok(token) => token,
-        Err(transport::TokenError::Missing) => {
-            return Err(Failure::Usage(UsageError::TokenMissing))
-        }
-        Err(transport::TokenError::Empty) => return Err(Failure::Usage(UsageError::TokenEmpty)),
-    };
+    let assignments = load_assignments(&invocation)?;
+    let endpoint = resolve_endpoint(invocation.endpoint, &assignments)?;
+    let token = resolve_token(&assignments)?;
     if matches!(invocation.request, RequestSource::Stdin) && std::io::stdin().is_terminal() {
         return Err(Failure::Usage(UsageError::StdinIsTerminal));
     }
     let bytes = read_request(&invocation.request)?;
     let request = decision::parse_request(&bytes).map_err(Failure::Request)?;
     let body = decision::render_request(&request);
-    let response = transport::post(
-        &invocation.endpoint,
-        &token,
-        &body,
-        invocation.timeout,
-        BODY_LIMIT,
-    )
-    .map_err(Failure::Transport)?;
+    let response = transport::post(&endpoint, &token, &body, invocation.timeout, BODY_LIMIT)
+        .map_err(Failure::Transport)?;
     let decision = decision::parse_decision(&response).map_err(Failure::Response)?;
     decision::check_decision(&request, &decision).map_err(Failure::Response)?;
     let mut output = decision::render_decision(&decision);
@@ -161,9 +164,6 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
 }
 
 fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
-    if args.is_empty() {
-        return Err(UsageError::EndpointRequired);
-    }
     if args.len() == 1 && args[0] == "--help" {
         return Ok(Command::Help);
     }
@@ -180,6 +180,7 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
     let mut endpoint = None;
     let mut request = None;
     let mut timeout = None;
+    let mut environment_file = None;
     let mut index = 0;
     while index < args.len() {
         let name = &args[index];
@@ -219,14 +220,21 @@ fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
                 }
                 timeout = Some(parse_timeout(value)?);
             }
+            "--environment-file" => {
+                if environment_file.is_some() {
+                    return Err(UsageError::DuplicateFlag);
+                }
+                environment_file = Some(PathBuf::from(value));
+            }
             _ => return Err(UsageError::UnknownArgument),
         }
     }
 
     Ok(Command::Decide(Invocation {
-        endpoint: endpoint.ok_or(UsageError::EndpointRequired)?,
+        endpoint,
         request: request.unwrap_or(RequestSource::Stdin),
         timeout: timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
+        environment_file,
     }))
 }
 
@@ -245,24 +253,17 @@ fn help_text() -> String {
         let Some(placeholder) = flag.value else {
             continue;
         };
-        if flag.name == "--endpoint" {
-            synopsis.push(' ');
-            synopsis.push_str(flag.name);
-            synopsis.push(' ');
-            synopsis.push_str(placeholder);
-        } else {
-            synopsis.push_str(" [");
-            synopsis.push_str(flag.name);
-            synopsis.push(' ');
-            synopsis.push_str(placeholder);
-            synopsis.push(']');
-        }
+        synopsis.push_str(" [");
+        synopsis.push_str(flag.name);
+        synopsis.push(' ');
+        synopsis.push_str(placeholder);
+        synopsis.push(']');
     }
 
     let mut lines = vec![
         synopsis,
         String::new(),
-        "BASS_TOKEN is the bearer token. bass does not write the token.".to_string(),
+        "BASS_TOKEN is the bearer token. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -340,6 +341,96 @@ impl std::fmt::Display for UsageError {
             }
             UsageError::HelpMixed => formatter.write_str("--help is a sole argument."),
             UsageError::VersionMixed => formatter.write_str("--version is a sole argument."),
+            UsageError::InvalidConfigurationText => {
+                formatter.write_str("A configuration value is not valid text.")
+            }
+            UsageError::Environment(error) => error.fmt(formatter),
+        }
+    }
+}
+
+fn load_assignments(invocation: &Invocation) -> Result<environment::Assignments, Failure> {
+    let loaded = match &invocation.environment_file {
+        Some(path) => environment::load(path, true),
+        None => match default_environment_file()? {
+            Some(path) => environment::load(&path, false),
+            None => Ok(None),
+        },
+    };
+    match loaded {
+        Ok(Some(assignments)) => Ok(assignments),
+        Ok(None) => Ok(environment::Assignments {
+            endpoint: None,
+            token: None,
+        }),
+        Err(error) => Err(Failure::Usage(UsageError::Environment(error))),
+    }
+}
+
+fn default_environment_file() -> Result<Option<PathBuf>, Failure> {
+    let layout = if cfg!(windows) {
+        environment::ConfigurationLayout::Windows
+    } else {
+        environment::ConfigurationLayout::Unix
+    };
+    let xdg = configuration_directory("XDG_CONFIG_HOME")?;
+    let home = configuration_directory("HOME")?;
+    let appdata = configuration_directory("APPDATA")?;
+    Ok(environment::default_path(
+        layout,
+        xdg.as_deref(),
+        home.as_deref(),
+        appdata.as_deref(),
+    ))
+}
+
+fn configuration_directory(name: &str) -> Result<Option<String>, Failure> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(Failure::Usage(UsageError::InvalidConfigurationText))
+        }
+    }
+}
+
+fn resolve_endpoint(
+    flag: Option<transport::Endpoint>,
+    assignments: &environment::Assignments,
+) -> Result<transport::Endpoint, Failure> {
+    if let Some(endpoint) = flag {
+        return Ok(endpoint);
+    }
+    if let Some(value) = process_value("BASS_ENDPOINT")? {
+        return transport::Endpoint::parse(&value)
+            .map_err(|error| Failure::Usage(UsageError::Endpoint(error)));
+    }
+    if let Some(value) = &assignments.endpoint {
+        return transport::Endpoint::parse(value)
+            .map_err(|error| Failure::Usage(UsageError::Endpoint(error)));
+    }
+    Err(Failure::Usage(UsageError::EndpointRequired))
+}
+
+fn resolve_token(assignments: &environment::Assignments) -> Result<transport::Token, Failure> {
+    let value = match process_value("BASS_TOKEN")? {
+        Some(value) => Some(value),
+        None => assignments.token.clone(),
+    };
+    match transport::token_from_env(value.as_deref()) {
+        Ok(token) => Ok(token),
+        Err(transport::TokenError::Missing) => Err(Failure::Usage(UsageError::TokenMissing)),
+        Err(transport::TokenError::Empty) => Err(Failure::Usage(UsageError::TokenEmpty)),
+    }
+}
+
+fn process_value(name: &str) -> Result<Option<String>, Failure> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(Failure::Usage(UsageError::InvalidConfigurationText))
         }
     }
 }

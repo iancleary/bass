@@ -1,14 +1,33 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+static CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn fresh_config_dir() -> PathBuf {
+    let number = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("bass-config-{}-{number}", std::process::id()));
+    std::fs::create_dir_all(&path).expect("create configuration directory");
+    path
+}
+
 fn bass(args: &[&str]) -> Command {
+    command_in(&fresh_config_dir(), args)
+}
+
+fn command_in(config: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_bass"));
     command.args(args);
     command.stdin(Stdio::null());
+    command.env("XDG_CONFIG_HOME", config);
+    command.env("HOME", config);
+    command.env_remove("APPDATA");
     command.env_remove("BASS_TOKEN");
+    command.env_remove("BASS_ENDPOINT");
     for name in [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -52,7 +71,9 @@ fn help_lists_the_flags_and_the_token_variable() {
         "--timeout-seconds",
         "--help",
         "--version",
+        "--environment-file",
         "BASS_TOKEN",
+        "BASS_ENDPOINT",
     ] {
         assert!(text.contains(name), "{name} missing from help");
     }
@@ -255,6 +276,345 @@ fn answer_kind_mismatch_omits_the_response_body() {
     assert_eq!(stderr, "An answer kind differs from its question.\n");
     assert!(!stderr.contains("RESPONSE-BODY-MARKER"));
     assert!(!stderr.contains("decision-token"));
+}
+
+#[test]
+fn environment_file_supplies_endpoint_and_token() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        &format!("# host file\n\nBASS_ENDPOINT=http://{address}/decision\nBASS_TOKEN=file-token\n"),
+        0o600,
+    );
+    let request = write_request("environment-file");
+    let mut command = command_in(
+        &config,
+        &[
+            "--request",
+            request.to_str().expect("request path"),
+            "--timeout-seconds",
+            "5",
+        ],
+    );
+    let output = output_of(&mut command);
+    let captured = handle.join().expect("server thread");
+    let _ = std::fs::remove_file(&request);
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert!(!output
+        .stdout
+        .windows(b"file-token".len())
+        .any(|window| window == b"file-token"));
+    let (headers, _) = split_http(&captured);
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer file-token"));
+    assert!(headers.starts_with("POST /decision "));
+}
+
+#[test]
+fn flag_and_process_environment_override_the_file() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_ENDPOINT=http://127.0.0.1:9/from-file\nBASS_TOKEN=file-token\n",
+        0o600,
+    );
+    let request = write_request("override-file");
+    let mut command = command_in(
+        &config,
+        &[
+            "--endpoint",
+            &format!("http://{address}/decision"),
+            "--request",
+            request.to_str().expect("request path"),
+            "--timeout-seconds",
+            "5",
+        ],
+    );
+    command.env("BASS_ENDPOINT", "http://127.0.0.1:9/from-process");
+    command.env("BASS_TOKEN", "process-token");
+    let output = output_of(&mut command);
+    let captured = handle.join().expect("server thread");
+    let _ = std::fs::remove_file(&request);
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert!(text.is_empty(), "{text}");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    assert!(!stdout.contains("file-token"));
+    assert!(!stdout.contains("process-token"));
+    assert!(!text.contains("file-token"));
+    assert!(!text.contains("process-token"));
+    let (headers, _) = split_http(&captured);
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer process-token"));
+    assert!(!headers.to_ascii_lowercase().contains("file-token"));
+    assert!(headers.starts_with("POST /decision "));
+}
+
+#[test]
+fn process_environment_overrides_the_file_endpoint() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_ENDPOINT=http://127.0.0.1:9/from-file\nBASS_TOKEN=file-token\n",
+        0o600,
+    );
+    let mut command = command_in(&config, &["--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output
+        .stdout
+        .windows(b"file-token".len())
+        .any(|window| window == b"file-token"));
+    assert!(!output
+        .stderr
+        .windows(b"file-token".len())
+        .any(|window| window == b"file-token"));
+    let (headers, _) = split_http(&captured);
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer file-token"));
+    assert!(headers.starts_with("POST /decision "));
+}
+
+#[cfg(unix)]
+#[test]
+fn permissive_environment_file_is_refused() {
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_ENDPOINT=http://127.0.0.1:9/decision\nBASS_TOKEN=file-token\n",
+        0o644,
+    );
+    let mut command = command_in(
+        &config,
+        &[
+            "--endpoint",
+            "http://127.0.0.1:9/decision",
+            "--timeout-seconds",
+            "5",
+        ],
+    );
+    command.env("BASS_TOKEN", "process-token");
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(
+        stderr,
+        "The environment file permits group or other access.\n"
+    );
+    assert!(!stderr.contains("file-token"));
+    assert!(!stderr.contains("process-token"));
+    assert!(!stderr.contains(&config.display().to_string()));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn malformed_and_duplicate_environment_files_are_rejected() {
+    let malformed = fresh_config_dir();
+    write_environment(&malformed, "BASS_TOKEN\n", 0o600);
+    let malformed_output = output_of(&mut command_in(
+        &malformed,
+        &["--endpoint", "http://127.0.0.1:9/decision"],
+    ));
+    assert_eq!(status_code(&malformed_output), 2);
+    assert_eq!(
+        malformed_output.stderr,
+        b"The environment file has a malformed line.\n"
+    );
+
+    let duplicate = fresh_config_dir();
+    write_environment(
+        &duplicate,
+        "BASS_TOKEN=file-token\nBASS_TOKEN=other-token\nBASS_ENDPOINT=http://127.0.0.1:9/decision\n",
+        0o600,
+    );
+    let duplicate_output = output_of(&mut command_in(&duplicate, &[]));
+    assert_eq!(status_code(&duplicate_output), 2);
+    let stderr = String::from_utf8(duplicate_output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The environment file repeats a key.\n");
+    assert!(!stderr.contains("file-token"));
+    assert!(!stderr.contains("other-token"));
+}
+
+#[test]
+fn unknown_environment_key_is_rejected() {
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_MODEL=demo\nBASS_TOKEN=file-token\nBASS_ENDPOINT=http://127.0.0.1:9/decision\n",
+        0o600,
+    );
+    let output = output_of(&mut command_in(&config, &[]));
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The environment file has an unknown key.\n");
+    assert!(!stderr.contains("file-token"));
+    assert!(!stderr.contains("demo"));
+}
+
+#[test]
+fn named_environment_file_must_exist() {
+    let config = fresh_config_dir();
+    let missing = config.join("token-marker-value").join("environment");
+    let output = output_of(&mut command_in(
+        &config,
+        &[
+            "--environment-file",
+            missing.to_str().expect("missing path"),
+            "--endpoint",
+            "http://127.0.0.1:9/decision",
+        ],
+    ));
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The environment file could not be read.\n");
+    assert!(!stderr.contains("token-marker-value"));
+}
+
+#[test]
+fn environment_file_value_is_not_shell_expanded() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let config = fresh_config_dir();
+    let path = config.join("named-environment");
+    std::fs::write(
+        &path,
+        format!("BASS_ENDPOINT=http://{address}/decision\nBASS_TOKEN=$(printf file-token)\n"),
+    )
+    .expect("write named environment file");
+    restrict_environment_file(&path, 0o600);
+    let mut command = command_in(
+        &config,
+        &[
+            "--environment-file",
+            path.to_str().expect("environment path"),
+            "--timeout-seconds",
+            "5",
+        ],
+    );
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output
+        .stdout
+        .windows(b"file-token".len())
+        .any(|window| window == b"file-token"));
+    assert!(!output
+        .stderr
+        .windows(b"file-token".len())
+        .any(|window| window == b"file-token"));
+    let (headers, _) = split_http(&captured);
+    assert!(
+        headers.contains("Authorization: Bearer $(printf file-token)")
+            || headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer $(printf file-token)")
+    );
+}
+
+#[test]
+fn cleartext_endpoint_in_the_file_is_rejected() {
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        "BASS_ENDPOINT=http://example.invalid/decision\nBASS_TOKEN=file-token\n",
+        0o600,
+    );
+    let output = output_of(&mut command_in(&config, &["--timeout-seconds", "5"]));
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "Cleartext is limited to a loopback IP literal.\n");
+    assert!(!stderr.contains("file-token"));
+}
+
+#[test]
+fn token_flag_is_rejected_without_echoing_the_value() {
+    let output = output_of(&mut bass(&["--token", "command-line-token"]));
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "An argument was not recognized.\n");
+    assert!(!stderr.contains("command-line-token"));
+}
+
+const REQUEST_DOCUMENT: &[u8] = br#"{"model":"demo","state":"pending","questions":{"eligible":{"type":"noul","instructions":"Eligible?"}}}"#;
+
+fn write_request(name: &str) -> PathBuf {
+    let number = CONFIG_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("bass-{name}-{number}.json"));
+    std::fs::write(&path, REQUEST_DOCUMENT).expect("write request");
+    path
+}
+
+fn write_environment(config: &Path, body: &str, mode: u32) {
+    let directory = config.join("bass");
+    std::fs::create_dir_all(&directory).expect("create bass configuration directory");
+    let path = directory.join("environment");
+    std::fs::write(&path, body).expect("write environment file");
+    restrict_environment_file(&path, mode);
+}
+
+fn restrict_environment_file(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("set environment file mode");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
 }
 
 fn post_stdin(endpoint: &str, document: &[u8]) -> Output {
