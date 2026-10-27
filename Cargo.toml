@@ -4,7 +4,14 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT"
-description = "Command-line client for decision APIs (placeholder)"
+description = "Command-line client for text and JSON decision requests"
 repository = "https://github.com/iancleary/bass"
 readme = "README.md"
 authors = ["Ian Cleary"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
+# 2.5.4 and later depend on idna 1, and that line does not build on Rust 1.83.
+url = "=2.5.2"
