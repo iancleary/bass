@@ -12,7 +12,6 @@ pub(super) enum ConfigurationLayout {
 pub(super) struct Assignments {
     pub(super) endpoint: Option<String>,
     pub(super) token: Option<String>,
-    pub(super) token_origin: Option<String>,
 }
 
 pub(super) enum FileError {
@@ -61,7 +60,6 @@ pub(super) fn load(path: &Path, required: bool) -> Result<Option<Assignments>, F
 pub(super) fn parse(text: &str) -> Result<Assignments, FileError> {
     let mut endpoint = None;
     let mut token = None;
-    let mut token_origin = None;
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         let trimmed = line.trim_start_matches([' ', '\t']);
@@ -77,7 +75,6 @@ pub(super) fn parse(text: &str) -> Result<Assignments, FileError> {
         let slot = match key {
             "BASS_ENDPOINT" => &mut endpoint,
             "BASS_TOKEN" => &mut token,
-            "BASS_TOKEN_ORIGIN" => &mut token_origin,
             _ => return Err(FileError::UnknownKey),
         };
         if slot.is_some() {
@@ -85,11 +82,7 @@ pub(super) fn parse(text: &str) -> Result<Assignments, FileError> {
         }
         *slot = Some(value.to_string());
     }
-    Ok(Assignments {
-        endpoint,
-        token,
-        token_origin,
-    })
+    Ok(Assignments { endpoint, token })
 }
 
 fn present(value: Option<&str>) -> Option<&str> {
@@ -176,15 +169,6 @@ mod tests {
         assert_eq!(
             assignments.token.as_deref(),
             Some("$(printf secret) # stays")
-        );
-        assert_eq!(assignments.token_origin, None);
-        let with_origin = match parse("BASS_TOKEN_ORIGIN=https://gateway.example\n") {
-            Ok(assignments) => assignments,
-            Err(error) => panic!("{error}"),
-        };
-        assert_eq!(
-            with_origin.token_origin.as_deref(),
-            Some("https://gateway.example")
         );
     }
 

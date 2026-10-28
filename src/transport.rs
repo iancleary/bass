@@ -30,13 +30,6 @@ pub(super) enum TransportError {
     Exchange,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub(super) struct Origin {
-    scheme: String,
-    host: String,
-    port: u16,
-}
-
 pub(super) fn post(
     endpoint: &Endpoint,
     token: Option<&Token>,
@@ -183,56 +176,6 @@ impl Endpoint {
     pub(super) fn named_cleartext(&self) -> bool {
         self.named_cleartext
     }
-
-    pub(super) fn origin(&self) -> Origin {
-        origin_from_url(&self.url).expect("parsed endpoint has an origin")
-    }
-}
-
-pub(super) fn parse_token_origin(raw: &str) -> Option<Origin> {
-    let url = Url::parse(raw).ok()?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return None;
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return None;
-    }
-    let path = url.path();
-    if path != "/" && !path.is_empty() {
-        return None;
-    }
-    origin_from_url(&url)
-}
-
-pub(super) fn origin_of_endpoint_setting(raw: &str) -> Option<Origin> {
-    let url = Url::parse(raw).ok()?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return None;
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-    if url.fragment().is_some() {
-        return None;
-    }
-    origin_from_url(&url)
-}
-
-fn origin_from_url(url: &Url) -> Option<Origin> {
-    let port = url.port_or_known_default()?;
-    let host = match url.host()? {
-        Host::Domain(name) => name.to_ascii_lowercase(),
-        Host::Ipv4(address) => address.to_string(),
-        Host::Ipv6(address) => address.to_string(),
-    };
-    Some(Origin {
-        scheme: url.scheme().to_ascii_lowercase(),
-        host,
-        port,
-    })
 }
 
 pub(super) fn normalize_hostname(raw: &str) -> Option<String> {

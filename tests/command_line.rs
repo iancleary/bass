@@ -28,7 +28,6 @@ fn command_in(config: &Path, args: &[&str]) -> Command {
     command.env_remove("APPDATA");
     command.env_remove("BASS_TOKEN");
     command.env_remove("BASS_ENDPOINT");
-    command.env_remove("BASS_TOKEN_ORIGIN");
     for name in [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -77,14 +76,12 @@ fn help_lists_the_flags_and_the_token_variable() {
     assert_eq!(status_code(&decision), 0);
     let decision_text = String::from_utf8(decision.stdout).expect("decide help is utf-8");
     for name in [
-        "--endpoint",
         "--timeout-seconds",
         "--environment-file",
         "--allow-cleartext-host",
         "REQUEST",
         "BASS_TOKEN",
         "BASS_ENDPOINT",
-        "BASS_TOKEN_ORIGIN",
     ] {
         assert!(
             decision_text.contains(name),
@@ -125,13 +122,8 @@ fn help_beside_another_argument_exits_2() {
 fn absent_token_sends_no_authorization_header() {
     let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
     let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -156,11 +148,9 @@ fn absent_token_sends_no_authorization_header() {
 
 #[test]
 fn cleartext_hostname_is_rejected() {
-    let output = output_of(&mut bass(&[
-        "decide",
-        "--endpoint",
-        "http://example.invalid/decision",
-    ]));
+    let mut command = bass(&["decide"]);
+    command.env("BASS_ENDPOINT", "http://example.invalid/decision");
+    let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
     assert_eq!(
         output.stderr,
@@ -170,11 +160,12 @@ fn cleartext_hostname_is_rejected() {
 
 #[test]
 fn userinfo_is_rejected_without_echoing_the_secret() {
-    let output = output_of(&mut bass(&[
-        "decide",
-        "--endpoint",
+    let mut command = bass(&["decide"]);
+    command.env(
+        "BASS_ENDPOINT",
         "http://operator:endpoint-secret@127.0.0.1/decision",
-    ]));
+    );
+    let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
     assert_eq!(stderr, "The endpoint contains user info.\n");
@@ -183,15 +174,9 @@ fn userinfo_is_rejected_without_echoing_the_secret() {
 
 #[test]
 fn https_hostname_is_accepted_before_the_document_is_checked() {
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        "https://example.invalid/decision",
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", "https://example.invalid/decision");
     command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", "https://example.invalid");
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -214,18 +199,9 @@ fn https_hostname_is_accepted_before_the_document_is_checked() {
 fn invalid_request_does_not_connect() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = listener.local_addr().expect("address");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.env("BASS_TOKEN", "decision-token");
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/decision")),
-    );
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -258,17 +234,12 @@ fn decision_is_posted_and_printed() {
     std::fs::write(&path, request).expect("write request file");
     let mut command = bass(&[
         "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
         path.to_str().expect("temp path"),
         "--timeout-seconds",
         "5",
     ]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.env("BASS_TOKEN", "decision-token");
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/decision")),
-    );
     command.env("HTTP_PROXY", format!("http://{proxy_address}"));
     command.env("http_proxy", format!("http://{proxy_address}"));
     let output = output_of(&mut command);
@@ -384,7 +355,7 @@ fn environment_file_supplies_endpoint_and_token() {
 }
 
 #[test]
-fn flag_and_process_environment_override_the_file() {
+fn process_environment_overrides_the_file_token_and_endpoint() {
     let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
     let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
     let config = fresh_config_dir();
@@ -398,8 +369,6 @@ fn flag_and_process_environment_override_the_file() {
         &config,
         &[
             "decide",
-            "--endpoint",
-            &format!("http://{address}/decision"),
             request.to_str().expect("request path"),
             "--timeout-seconds",
             "5",
@@ -428,7 +397,7 @@ fn flag_and_process_environment_override_the_file() {
         .to_ascii_lowercase()
         .contains("authorization: bearer process-token"));
     assert!(!headers.to_ascii_lowercase().contains("file-token"));
-    assert!(headers.starts_with("POST /decision "));
+    assert!(headers.starts_with("POST /from-process "));
 }
 
 #[test]
@@ -485,16 +454,8 @@ fn permissive_environment_file_is_refused() {
         "BASS_ENDPOINT=http://127.0.0.1:9/decision\nBASS_TOKEN=file-token\n",
         0o644,
     );
-    let mut command = command_in(
-        &config,
-        &[
-            "decide",
-            "--endpoint",
-            "http://127.0.0.1:9/decision",
-            "--timeout-seconds",
-            "5",
-        ],
-    );
+    let mut command = command_in(&config, &["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", "http://127.0.0.1:9/decision");
     command.env("BASS_TOKEN", "process-token");
     let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
@@ -513,10 +474,7 @@ fn permissive_environment_file_is_refused() {
 fn malformed_and_duplicate_environment_files_are_rejected() {
     let malformed = fresh_config_dir();
     write_environment(&malformed, "BASS_TOKEN\n", 0o600);
-    let malformed_output = output_of(&mut command_in(
-        &malformed,
-        &["decide", "--endpoint", "http://127.0.0.1:9/decision"],
-    ));
+    let malformed_output = output_of(&mut command_in(&malformed, &["decide"]));
     assert_eq!(status_code(&malformed_output), 2);
     assert_eq!(
         malformed_output.stderr,
@@ -563,8 +521,6 @@ fn named_environment_file_must_exist() {
             "decide",
             "--environment-file",
             missing.to_str().expect("missing path"),
-            "--endpoint",
-            "http://127.0.0.1:9/decision",
         ],
     ));
     assert_eq!(status_code(&output), 2);
@@ -657,11 +613,13 @@ fn allowed_cleartext_host_accepts_a_credential_placeholder() {
         "decide",
         "--allow-cleartext-host",
         "HOST.OPENSHELL.INTERNAL.",
-        "--endpoint",
-        &format!("http://HOST.OPENSHELL.INTERNAL.:{port}/decision"),
         "--timeout-seconds",
         "5",
     ]);
+    command.env(
+        "BASS_ENDPOINT",
+        format!("http://HOST.OPENSHELL.INTERNAL.:{port}/decision"),
+    );
     command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
     command.env("LD_PRELOAD", named_host_resolver());
     command.stdin(Stdio::piped());
@@ -705,11 +663,13 @@ fn allowed_cleartext_host_rejects_a_real_token() {
         "decide",
         "--allow-cleartext-host",
         "host.openshell.internal",
-        "--endpoint",
-        &format!("http://host.openshell.internal:{port}/decision"),
         "--timeout-seconds",
         "5",
     ]);
+    command.env(
+        "BASS_ENDPOINT",
+        format!("http://host.openshell.internal:{port}/decision"),
+    );
     command.env("BASS_TOKEN", "live-gateway-token");
     command.env("LD_PRELOAD", named_host_resolver());
     let output = output_of(&mut command);
@@ -737,11 +697,13 @@ fn allowed_cleartext_host_accepts_an_absent_token() {
         "decide",
         "--allow-cleartext-host",
         "host.openshell.internal",
-        "--endpoint",
-        &format!("http://host.openshell.internal:{port}/decision"),
         "--timeout-seconds",
         "5",
     ]);
+    command.env(
+        "BASS_ENDPOINT",
+        format!("http://host.openshell.internal:{port}/decision"),
+    );
     command.env("LD_PRELOAD", named_host_resolver());
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -807,19 +769,13 @@ fn empty_token_is_absent_and_overrides_a_file_token() {
 }
 
 #[test]
-fn whitespace_only_token_is_absent_and_does_not_read_the_origin() {
+fn whitespace_only_token_is_absent() {
     for token in [" ", "\t"] {
         let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
         let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-        let mut command = bass(&[
-            "decide",
-            "--endpoint",
-            &format!("http://{address}/decision"),
-            "--timeout-seconds",
-            "5",
-        ]);
+        let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+        command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
         command.env("BASS_TOKEN", token);
-        command.env("BASS_TOKEN_ORIGIN", "not-an-origin");
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
@@ -848,13 +804,8 @@ fn token_with_surrounding_whitespace_exits_2() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = listener.local_addr().expect("address");
     listener.set_nonblocking(true).expect("nonblocking");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.env("BASS_TOKEN", " secret-token ");
     let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
@@ -873,9 +824,11 @@ fn a_different_cleartext_host_is_rejected() {
         "decide",
         "--allow-cleartext-host",
         "host.openshell.internal",
-        "--endpoint",
-        "http://host.openshell.internal.example/decision",
     ]);
+    command.env(
+        "BASS_ENDPOINT",
+        "http://host.openshell.internal.example/decision",
+    );
     command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
     let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
@@ -890,9 +843,8 @@ fn a_second_trailing_dot_does_not_match_the_allowed_host() {
         "decide",
         "--allow-cleartext-host",
         "host.openshell.internal",
-        "--endpoint",
-        "http://host.openshell.internal../decision",
     ]);
+    command.env("BASS_ENDPOINT", "http://host.openshell.internal../decision");
     command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
     let output = output_of(&mut command);
     assert_eq!(status_code(&output), 2);
@@ -903,11 +855,8 @@ fn a_second_trailing_dot_does_not_match_the_allowed_host() {
 
 #[test]
 fn cleartext_host_allowance_is_not_read_from_the_environment() {
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        "http://host.openshell.internal/decision",
-    ]);
+    let mut command = bass(&["decide"]);
+    command.env("BASS_ENDPOINT", "http://host.openshell.internal/decision");
     command.env("BASS_ALLOW_CLEARTEXT_HOST", "host.openshell.internal");
     command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
     let output = output_of(&mut command);
@@ -992,95 +941,11 @@ fn duplicate_response_key_exits_5() {
 }
 
 #[test]
-fn flag_endpoint_on_another_origin_is_refused() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    listener.set_nonblocking(true).expect("nonblocking");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
-    command.env("BASS_TOKEN", "origin-secret-token");
-    command.env("BASS_ENDPOINT", "http://127.0.0.1:9/decision");
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn bass");
-    let _ = child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT);
-    let output = child.wait_with_output().expect("wait for bass");
-    assert_eq!(status_code(&output), 2);
-    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert_eq!(
-        stderr,
-        "The endpoint origin differs from the token origin.\n"
-    );
-    assert!(!stderr.contains("origin-secret-token"));
-    match listener.accept() {
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-        other => panic!("expected no connection, got {other:?}"),
-    }
-}
-
-#[test]
-fn same_origin_endpoint_is_accepted() {
+fn placeholder_token_is_sent_to_the_configured_endpoint() {
     let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
     let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
-    command.env("BASS_TOKEN", "origin-secret-token");
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/from-origin")),
-    );
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn bass");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT)
-        .expect("write request");
-    let output = child.wait_with_output().expect("wait for bass");
-    let captured = handle.join().expect("server thread");
-    assert_eq!(
-        status_code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!contains_bytes(&output.stdout, b"origin-secret-token"));
-    assert!(!contains_bytes(&output.stderr, b"origin-secret-token"));
-    let (headers, _) = split_http(&captured);
-    assert!(headers
-        .to_ascii_lowercase()
-        .contains("authorization: bearer origin-secret-token"));
-}
-
-#[test]
-fn placeholder_token_is_exempt_from_origin_binding() {
-    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
-    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.env("BASS_TOKEN", "openshell:resolve:env:EXAMPLE_TOKEN");
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -1104,169 +969,14 @@ fn placeholder_token_is_exempt_from_origin_binding() {
 }
 
 #[test]
-fn token_origin_comparison_folds_host_case_and_default_ports() {
-    let mut same = bass(&[
-        "decide",
-        "--endpoint",
-        "https://example.invalid:443/decision",
-        "--timeout-seconds",
-        "1",
-    ]);
-    same.env("BASS_TOKEN", "decision-token");
-    same.env("BASS_TOKEN_ORIGIN", "https://EXAMPLE.INVALID");
-    same.stdin(Stdio::piped());
-    same.stdout(Stdio::piped());
-    same.stderr(Stdio::piped());
-    let mut child = same.spawn().expect("spawn bass");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT)
-        .expect("write request");
-    let output = child.wait_with_output().expect("wait for bass");
-    assert_eq!(status_code(&output), 4);
-    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert_ne!(
-        stderr,
-        "The endpoint origin differs from the token origin.\n"
-    );
-    assert!(!stderr.contains("decision-token"));
-
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        "https://example.invalid/decision",
-        "--timeout-seconds",
-        "1",
-    ]);
-    command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", "https://example.invalid:444");
-    let different = output_of(&mut command);
-    assert_eq!(status_code(&different), 2);
-    let stderr = String::from_utf8(different.stderr).expect("stderr is utf-8");
-    assert_eq!(
-        stderr,
-        "The endpoint origin differs from the token origin.\n"
-    );
-    assert!(!stderr.contains("decision-token"));
-}
-
-#[test]
-fn file_token_origin_binds_the_token() {
-    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
-    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-    let config = fresh_config_dir();
-    write_environment(
-        &config,
-        &format!(
-            "BASS_ENDPOINT=http://127.0.0.1:9/unused\nBASS_TOKEN=file-origin-token\nBASS_TOKEN_ORIGIN=http://{address}\n"
-        ),
-        0o600,
-    );
-    let mut command = command_in(
-        &config,
-        &[
-            "decide",
-            "--endpoint",
-            &format!("http://{address}/decision"),
-            "--timeout-seconds",
-            "5",
-        ],
-    );
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn bass");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT)
-        .expect("write request");
-    let output = child.wait_with_output().expect("wait for bass");
-    let captured = handle.join().expect("server thread");
-    assert_eq!(
-        status_code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!contains_bytes(&output.stdout, b"file-origin-token"));
-    assert!(!contains_bytes(&output.stderr, b"file-origin-token"));
-    let (headers, _) = split_http(&captured);
-    assert!(headers
-        .to_ascii_lowercase()
-        .contains("authorization: bearer file-origin-token"));
-}
-
-#[test]
-fn process_token_origin_overrides_the_file() {
-    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
-    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
-    let config = fresh_config_dir();
-    write_environment(
-        &config,
-        "BASS_ENDPOINT=http://127.0.0.1:9/unused\nBASS_TOKEN=file-origin-token\nBASS_TOKEN_ORIGIN=http://127.0.0.1:9\n",
-        0o600,
-    );
-    let mut command = command_in(
-        &config,
-        &[
-            "decide",
-            "--endpoint",
-            &format!("http://{address}/decision"),
-            "--timeout-seconds",
-            "5",
-        ],
-    );
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/decision")),
-    );
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn bass");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT)
-        .expect("write request");
-    let output = child.wait_with_output().expect("wait for bass");
-    let captured = handle.join().expect("server thread");
-    assert_eq!(
-        status_code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!contains_bytes(&output.stderr, b"file-origin-token"));
-    let (headers, _) = split_http(&captured);
-    assert!(headers
-        .to_ascii_lowercase()
-        .contains("authorization: bearer file-origin-token"));
-}
-
-#[test]
 fn request_containing_the_token_exits_3_without_connecting() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = listener.local_addr().expect("address");
     listener.set_nonblocking(true).expect("nonblocking");
     let document = br#"{"model":"demo","state":{"note":"distinct-token-value"},"questions":{"eligible":{"type":"noul","instructions":"Eligible?"}}}"#;
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.env("BASS_TOKEN", "distinct-token-value");
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/decision")),
-    );
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -1431,15 +1141,9 @@ fn score_is_an_anchor_index() {
 
 #[test]
 fn idle_request_pipe_is_bounded_by_the_timeout() {
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        "http://127.0.0.1:9/decision",
-        "--timeout-seconds",
-        "1",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "1"]);
+    command.env("BASS_ENDPOINT", "http://127.0.0.1:9/decision");
     command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", "http://127.0.0.1:9");
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -1509,62 +1213,15 @@ fn oversized_integers_are_rejected_and_in_range_integers_stay_integers() {
 }
 
 #[test]
-fn missing_token_origin_explains_the_configuration() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let address = listener.local_addr().expect("address");
-    listener.set_nonblocking(true).expect("nonblocking");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-    ]);
-    command.env("BASS_TOKEN", "unbound-token-value");
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command.spawn().expect("spawn bass");
-    let _ = child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(REQUEST_DOCUMENT);
-    let output = child.wait_with_output().expect("wait for bass");
-    assert_eq!(status_code(&output), 2);
-    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert_eq!(
-        stderr,
-        "The token origin is not configured. Set BASS_TOKEN_ORIGIN, or set BASS_ENDPOINT.\n"
-    );
-    assert!(!stderr.contains("unbound-token-value"));
-    match listener.accept() {
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-        other => panic!("expected no connection, got {other:?}"),
-    }
-}
-
-#[test]
 fn hyphen_leading_request_path_is_passed_after_end_of_options() {
     let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
     let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
     let directory = fresh_config_dir();
     std::fs::write(directory.join("--decision.json"), REQUEST_DOCUMENT).expect("write request");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{address}/decision"),
-        "--timeout-seconds",
-        "5",
-        "--",
-        "--decision.json",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5", "--", "--decision.json"]);
+    command.env("BASS_ENDPOINT", format!("http://{address}/decision"));
     command.current_dir(&directory);
     command.env("BASS_TOKEN", "decision-token");
-    command.env(
-        "BASS_TOKEN_ORIGIN",
-        origin_before_path(&format!("http://{address}/decision")),
-    );
     let output = output_of(&mut command);
     let captured = handle.join().expect("server thread");
     assert_eq!(
@@ -1580,14 +1237,8 @@ fn hyphen_leading_request_path_is_passed_after_end_of_options() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let unused = listener.local_addr().expect("address");
     listener.set_nonblocking(true).expect("nonblocking");
-    let mut rejected = bass(&[
-        "decide",
-        "--endpoint",
-        &format!("http://{unused}/decision"),
-        "--timeout-seconds",
-        "5",
-        "--decision.json",
-    ]);
+    let mut rejected = bass(&["decide", "--timeout-seconds", "5", "--decision.json"]);
+    rejected.env("BASS_ENDPOINT", format!("http://{unused}/decision"));
     rejected.current_dir(&directory);
     rejected.env("BASS_TOKEN", "decision-token");
     let rejected_output = output_of(&mut rejected);
@@ -1604,16 +1255,9 @@ fn explicit_standard_input_marker_reads_a_pipe() {
     let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
     let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
     let endpoint = format!("http://{address}/decision");
-    let mut command = bass(&[
-        "decide",
-        "--endpoint",
-        &endpoint,
-        "--timeout-seconds",
-        "5",
-        "-",
-    ]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5", "-"]);
+    command.env("BASS_ENDPOINT", endpoint);
     command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", origin_before_path(&endpoint));
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -1753,9 +1397,9 @@ fn reject_before_connect(document: &str) -> Output {
     let address = listener.local_addr().expect("address");
     listener.set_nonblocking(true).expect("nonblocking");
     let endpoint = format!("http://{address}/decision");
-    let mut command = bass(&["decide", "--endpoint", &endpoint, "--timeout-seconds", "5"]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", &endpoint);
     command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", origin_before_path(&endpoint));
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -1803,16 +1447,10 @@ fn assert_status(status: u16, code: i32, message: &str) {
     assert!(!stderr.contains("decision-token"));
 }
 
-fn origin_before_path(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").expect("url scheme");
-    let authority = rest.split('/').next().expect("url authority");
-    format!("{scheme}://{authority}")
-}
-
 fn post_stdin(endpoint: &str, document: &[u8]) -> Output {
-    let mut command = bass(&["decide", "--endpoint", endpoint, "--timeout-seconds", "5"]);
+    let mut command = bass(&["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_ENDPOINT", endpoint);
     command.env("BASS_TOKEN", "decision-token");
-    command.env("BASS_TOKEN_ORIGIN", origin_before_path(endpoint));
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

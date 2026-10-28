@@ -2,7 +2,7 @@
 
 `bass decide` posts one decision request and prints the decision.
 
-The endpoint is a full URL you supply. No host is built into the program. `BASS_TOKEN` is an optional bearer token. When it is absent, empty, or only ASCII whitespace, `bass` sends no `Authorization` header and does not read `BASS_TOKEN_ORIGIN`. A token with leading or trailing ASCII whitespace is rejected. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
+The endpoint is `BASS_ENDPOINT`, from the process environment or the environment file. The process environment overrides the file. No host is built into the program, and the endpoint is not a command-line argument. The token is sent only to that endpoint. `BASS_TOKEN` is an optional bearer token. When it is absent, empty, or only ASCII whitespace, `bass` sends no `Authorization` header. A token with leading or trailing ASCII whitespace is rejected. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
 
 ## Send a decision
 
@@ -12,17 +12,19 @@ Put the endpoint and the token in the environment file, then pass a request docu
 bass decide request.json
 ```
 
-You can still pass the endpoint on the command line and export the token.
+You can export the endpoint and the token for one invocation.
 
 ```
+export BASS_ENDPOINT="https://example.invalid/decision"
 export BASS_TOKEN="replace-with-the-token"
-bass decide --endpoint "https://example.invalid/decision" request.json
+bass decide request.json
 ```
 
 Omit the request path to read the document from a pipe. `bass` reads standard input only when it is not a terminal.
 
 ```
-generator | bass decide --endpoint "https://example.invalid/decision"
+export BASS_ENDPOINT="https://example.invalid/decision"
+generator | bass decide
 ```
 
 `example.invalid` and `gateway.example` are documentation hosts. They are not services.
@@ -74,13 +76,11 @@ Unknown fields at the top level of the response, and unknown fields inside each 
 
 On macOS and Linux, `bass` reads `$XDG_CONFIG_HOME/bass/environment` when `XDG_CONFIG_HOME` is set and not empty. Otherwise it reads `$HOME/.config/bass/environment`. On Windows, `bass` reads `$XDG_CONFIG_HOME/bass/environment` when that variable is set and not empty. Otherwise it reads `%APPDATA%\bass\environment`. An absent default file is ignored. `--environment-file PATH` names a different file, and that file must exist.
 
-On Unix the file mode must grant no group or other access. `600` satisfies the check. `bass` rejects the file when any group or other bit is set, including when `--endpoint` and the process environment already supply both values. Windows support covers the path only. `bass` does not inspect a Windows access control list.
+On Unix the file mode must grant no group or other access. `600` satisfies the check. `bass` rejects the file when any group or other bit is set, including when the process environment already supplies both values. Windows support covers the path only. `bass` does not inspect a Windows access control list.
 
-`--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. An empty `BASS_TOKEN`, or one that is only ASCII whitespace, after that precedence, is absent, so `bass` sends no `Authorization` header and does not use a token from a lower-precedence source. A value that contains a token and also has leading or trailing ASCII whitespace is rejected with `BASS_TOKEN has leading or trailing whitespace.` `bass` does not trim that value before use. That refusal is inferred. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
+`BASS_ENDPOINT` in the process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. An empty `BASS_TOKEN`, or one that is only ASCII whitespace, after that precedence, is absent, so `bass` sends no `Authorization` header and does not use a token from a lower-precedence source. A value that contains a token and also has leading or trailing ASCII whitespace is rejected with `BASS_TOKEN has leading or trailing whitespace.` `bass` does not trim that value before use. That refusal is inferred. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The token is sent only to the endpoint from `BASS_ENDPOINT`. The cleartext host allowance is not one of these keys.
 
-The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT`, `BASS_TOKEN`, and `BASS_TOKEN_ORIGIN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
-
-`BASS_TOKEN_ORIGIN` applies only when a real token is present. When no token is configured, `bass` does not read `BASS_TOKEN_ORIGIN`. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. An absent token and a credential placeholder are not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred. Treating an empty token as absent is the configured behavior. An empty process value overriding a file token follows the empty-override rule. That interaction is inferred.
+The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT` and `BASS_TOKEN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
 
 ## Flags
 
@@ -88,7 +88,7 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 `REQUEST` is one optional positional argument. It is a file path, or `-` for standard input. When `REQUEST` is omitted, `bass` reads standard input if it is not a terminal. When standard input is a terminal, `bass` exits 2 and does not read it. A path that begins with a hyphen, other than a lone `-`, is written after `--`.
 
-`--endpoint URL` sets the decision URL for one invocation. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached.
+`--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached.
 
 `--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. It permits plain HTTP to that hostname when no token is configured, or when the token is an OpenShell credential placeholder. A real token is refused. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag. Cleartext to any other non-loopback host stays refused.
 
@@ -147,7 +147,6 @@ The real token stays in the mode `600` environment file or in the process enviro
 # %APPDATA%\bass\environment on Windows when XDG_CONFIG_HOME is unset.
 BASS_ENDPOINT=https://gateway.example/v1
 BASS_TOKEN=replace-with-the-token
-BASS_TOKEN_ORIGIN=https://gateway.example
 ```
 
 ```
@@ -161,8 +160,8 @@ On this side the default stays strict. A real token is not sent to a named host 
 Omit `BASS_TOKEN`. `bass` sends no `Authorization` header. If the decision server is a named host on a network the operator trusts, pass `--allow-cleartext-host` with that hostname. `decision.overlay.example` is a documentation host. It is not a service.
 
 ```
+export BASS_ENDPOINT="http://decision.overlay.example:8080/decision"
 bass decide --allow-cleartext-host decision.overlay.example \
-  --endpoint "http://decision.overlay.example:8080/decision" \
   request.json
 ```
 
@@ -173,15 +172,15 @@ The request is unauthenticated. The server decides whether to accept it. HTTP 40
 The sandbox holds the placeholder token and the host-local relay URL. Run `bass` with the allowance set to that relay name. The real token and the real gateway name stay outside the sandbox.
 
 ```
+export BASS_ENDPOINT="http://host.openshell.internal:8080/decision"
 export BASS_TOKEN="openshell:resolve:env:EXAMPLE_TOKEN"
 bass decide --allow-cleartext-host host.openshell.internal \
-  --endpoint "http://host.openshell.internal:8080/decision" \
   request.json
 ```
 
 The following statements about OpenShell were not verified from this repository. They are inferred from OpenShell documentation and the maintainer's existing profile. The OpenShell proxy substitutes the real credential only when its policy permits the binary, host, port, path, and method. A compromised sandbox therefore yields only the call that policy already allows. Adding `bass` to the allowed binaries adds no new class of access beyond the other binaries that policy already permits. Narrow the profile to the decision path and to POST only. That is a recommendation for the profile owner. `bass` does not enforce the profile.
 
-If the relay returns 403 with a credential endpoint mismatch, the profile does not permit this binary, host, port, path, or method. Adjust the profile. Do not replace the placeholder with a real token inside the sandbox. A credential placeholder is not bound to a token origin.
+If the relay returns 403 with a credential endpoint mismatch, the profile does not permit this binary, host, port, path, or method. Adjust the profile. Do not replace the placeholder with a real token inside the sandbox.
 
 ## Using bass from an agent skill
 

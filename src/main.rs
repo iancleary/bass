@@ -26,13 +26,6 @@ enum Summary {
 fn flags() -> &'static [Flag] {
     &[
         Flag {
-            name: "--endpoint",
-            value: Some("URL"),
-            summary: Summary::Fixed(
-                "Full decision URL. Overrides BASS_ENDPOINT from the process environment and the environment file.",
-            ),
-        },
-        Flag {
             name: "--timeout-seconds",
             value: Some("N"),
             summary: Summary::Timeout,
@@ -62,7 +55,6 @@ enum Command {
 }
 
 struct Invocation {
-    endpoint: Option<String>,
     request: RequestSource,
     timeout: Duration,
     environment_file: Option<PathBuf>,
@@ -88,9 +80,6 @@ enum UsageError {
     Environment(environment::FileError),
     CleartextNameInvalid,
     CleartextCredential,
-    TokenOriginMissing,
-    TokenOriginInvalid,
-    TokenOriginMismatch,
     TokenWhitespace,
     SubcommandRequired,
     UnknownCommand,
@@ -162,11 +151,7 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
         return Err(Failure::Usage(UsageError::OmittedRequestIsTerminal));
     }
     let assignments = load_assignments(&invocation)?;
-    let endpoint = resolve_endpoint(
-        invocation.endpoint.as_deref(),
-        invocation.cleartext_host.as_deref(),
-        &assignments,
-    )?;
+    let endpoint = resolve_endpoint(invocation.cleartext_host.as_deref(), &assignments)?;
     let token = resolve_token(&assignments)?;
     if endpoint.named_cleartext()
         && token
@@ -174,12 +159,6 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
             .is_some_and(|token| !token.is_credential_placeholder())
     {
         return Err(Failure::Usage(UsageError::CleartextCredential));
-    }
-    if let Some(token) = token
-        .as_ref()
-        .filter(|token| !token.is_credential_placeholder())
-    {
-        enforce_token_origin(&endpoint, token, &assignments)?;
     }
     let started = Instant::now();
     let bytes = read_request(&invocation.request, invocation.timeout)?;
@@ -231,7 +210,6 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
         return Err(UsageError::HelpMixed);
     }
 
-    let mut endpoint = None;
     let mut request = None;
     let mut timeout = None;
     let mut environment_file = None;
@@ -261,12 +239,6 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
             }
             index += 2;
             match flag.name {
-                "--endpoint" => {
-                    if endpoint.is_some() {
-                        return Err(UsageError::DuplicateFlag);
-                    }
-                    endpoint = Some(value.clone());
-                }
                 "--timeout-seconds" => {
                     if timeout.is_some() {
                         return Err(UsageError::DuplicateFlag);
@@ -305,7 +277,6 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
     }
 
     Ok(Command::Decide(Invocation {
-        endpoint,
         request: request.unwrap_or(RequestSource::StandardInput { explicit: false }),
         timeout: timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
         environment_file,
@@ -341,7 +312,7 @@ fn decide_help() -> String {
         String::new(),
         "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
-        "BASS_TOKEN is an optional bearer token. When it is absent, empty, or only ASCII whitespace, bass sends no Authorization header and does not read BASS_TOKEN_ORIGIN. Leading or trailing ASCII whitespace is rejected. A real token is sent only to its origin. BASS_TOKEN_ORIGIN is that origin when set. When BASS_TOKEN_ORIGIN is unset, the origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
+        "BASS_ENDPOINT is the decision URL. The process environment overrides the environment file. The token is sent only to that endpoint. BASS_TOKEN is an optional bearer token. When it is absent, empty, or only ASCII whitespace, bass sends no Authorization header. Leading or trailing ASCII whitespace is rejected. bass does not write the token.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -450,15 +421,6 @@ impl std::fmt::Display for UsageError {
             UsageError::CleartextCredential => formatter.write_str(
                 "Cleartext to a named host requires no token or an OpenShell credential placeholder.",
             ),
-            UsageError::TokenOriginMissing => formatter.write_str(
-                "The token origin is not configured. Set BASS_TOKEN_ORIGIN, or set BASS_ENDPOINT.",
-            ),
-            UsageError::TokenOriginInvalid => {
-                formatter.write_str("The token origin is not an origin.")
-            }
-            UsageError::TokenOriginMismatch => {
-                formatter.write_str("The endpoint origin differs from the token origin.")
-            }
             UsageError::TokenWhitespace => {
                 formatter.write_str("BASS_TOKEN has leading or trailing whitespace.")
             }
@@ -479,7 +441,6 @@ fn load_assignments(invocation: &Invocation) -> Result<environment::Assignments,
         Ok(None) => Ok(environment::Assignments {
             endpoint: None,
             token: None,
-            token_origin: None,
         }),
         Err(error) => Err(Failure::Usage(UsageError::Environment(error))),
     }
@@ -514,13 +475,10 @@ fn configuration_directory(name: &str) -> Result<Option<String>, Failure> {
 }
 
 fn resolve_endpoint(
-    flag: Option<&str>,
     cleartext_host: Option<&str>,
     assignments: &environment::Assignments,
 ) -> Result<transport::Endpoint, Failure> {
-    let raw = if let Some(endpoint) = flag {
-        endpoint.to_string()
-    } else if let Some(value) = process_value("BASS_ENDPOINT")? {
+    let raw = if let Some(value) = process_value("BASS_ENDPOINT")? {
         value
     } else if let Some(value) = &assignments.endpoint {
         value.clone()
@@ -529,48 +487,6 @@ fn resolve_endpoint(
     };
     transport::Endpoint::parse(&raw, cleartext_host)
         .map_err(|error| Failure::Usage(UsageError::Endpoint(error)))
-}
-
-fn enforce_token_origin(
-    endpoint: &transport::Endpoint,
-    token: &transport::Token,
-    assignments: &environment::Assignments,
-) -> Result<(), Failure> {
-    if token.is_credential_placeholder() {
-        return Ok(());
-    }
-    match configured_token_origin(assignments)? {
-        Some(origin) if origin == endpoint.origin() => Ok(()),
-        Some(_) => Err(Failure::Usage(UsageError::TokenOriginMismatch)),
-        None => Err(Failure::Usage(UsageError::TokenOriginMissing)),
-    }
-}
-
-fn configured_token_origin(
-    assignments: &environment::Assignments,
-) -> Result<Option<transport::Origin>, Failure> {
-    if let Some(value) = process_value("BASS_TOKEN_ORIGIN")? {
-        return Ok(Some(require_token_origin(&value)?));
-    }
-    if let Some(value) = &assignments.token_origin {
-        return Ok(Some(require_token_origin(value)?));
-    }
-    if let Some(value) = process_value("BASS_ENDPOINT")? {
-        return Ok(Some(require_endpoint_origin(&value)?));
-    }
-    if let Some(value) = &assignments.endpoint {
-        return Ok(Some(require_endpoint_origin(value)?));
-    }
-    Ok(None)
-}
-
-fn require_token_origin(value: &str) -> Result<transport::Origin, Failure> {
-    transport::parse_token_origin(value).ok_or(Failure::Usage(UsageError::TokenOriginInvalid))
-}
-
-fn require_endpoint_origin(value: &str) -> Result<transport::Origin, Failure> {
-    transport::origin_of_endpoint_setting(value)
-        .ok_or(Failure::Usage(UsageError::TokenOriginInvalid))
 }
 
 fn resolve_token(
