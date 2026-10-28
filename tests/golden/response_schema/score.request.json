@@ -1,0 +1,11 @@
+{
+  "model": "demo",
+  "state": ["row"],
+  "questions": {
+    "severity": {
+      "type": "score",
+      "instructions": "How severe is the ticket?",
+      "criteria": ["low", "high"]
+    }
+  }
+}

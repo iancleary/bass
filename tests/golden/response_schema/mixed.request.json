@@ -1,0 +1,23 @@
+{
+  "model": "demo",
+  "state": "The applicant asked for a review.",
+  "questions": {
+    "severity": {
+      "type": "score",
+      "instructions": "How severe is the request?",
+      "criteria": ["low", "medium", "high"]
+    },
+    "eligible": {
+      "type": "noul",
+      "instructions": "Is the applicant eligible?"
+    },
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should review it?",
+      "criteria": {
+        "technical": "The request describes an outage.",
+        "billing": "The request describes a payment."
+      }
+    }
+  }
+}

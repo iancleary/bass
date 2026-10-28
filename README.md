@@ -64,7 +64,23 @@ The response is one JSON object with `model` and `answers`. `usage` is optional.
 
 `model` must equal the request model. Every question has one answer of the same type, and every answer id is a question id.
 
-A `noul` answer has `noul`, a probability from 0 to 1. A `choice` answer has `choice`, `probabilities`, and `confidence`. `choice` is one of the option ids you sent. The decision server's documentation says those probabilities cover every option id. `bass` accepts a subset and rejects a key outside the option ids. That tolerance is deliberate. A `score` answer has `score`, `legend`, `probabilities`, and `confidence`. `score` is the probability-weighted anchor index, a finite number from 0 through one less than the number of levels in the request. It is not a 0 to 1 scale. `legend` and `probabilities` keys, when present, are the decimal index strings `0` through that last index, without a leading zero. Legend values are strings. Probabilities and confidence are numbers from 0 to 1. This score rule is inferred from the decision server's gateway documentation and was not verified against a live server.
+A `noul` answer has `noul`, a probability from 0 to 1. A `choice` answer has `choice`, `probabilities`, and `confidence`. `choice` is one of the option ids you sent. The decision server's documentation says those probabilities cover every option id. `bass` accepts a subset and rejects a key outside the option ids. That tolerance is deliberate. A `score` answer has `score`, `legend`, `probabilities`, and `confidence`. `score` is the probability-weighted anchor index, a finite number from 0 through one less than the number of levels in the request. It is not a 0 to 1 scale. `legend` and `probabilities` keys, when present, are the decimal index strings `0` through that last index, without a leading zero. Legend values are strings of at most 65536 bytes. Probabilities and confidence are numbers from 0 to 1. This score rule is inferred from the decision server's gateway documentation and was not verified against a live server.
+
+## Check a request
+
+`bass decide --check request.json` reads the request and validates every request rule that does not need the token. It does not connect. It does not read `BASS_ENDPOINT`, `BASS_TOKEN`, or an environment file. A valid request exits 0 and writes nothing. An invalid request exits 3 and writes the same sentence `bass decide` would write for that document. That includes a repeated object key, an integer outside the 64-bit range, nesting deeper than 512, and a document larger than 1 MiB.
+
+`--check` cannot test whether the request contains the token. That rule needs the token, and `--check` does not read it. A token that is only ASCII whitespace, and a token with leading or trailing ASCII whitespace, are configuration checks on `bass decide`. `--check` does not apply them. When no token is configured, there is no token to find. Keep secrets out of `state`. A later `bass decide` rejects the document when a real token is configured and the serialized request contains it. The read still stops after the default of 60 seconds. `--timeout-seconds` cannot change that limit.
+
+`--check` is rejected together with `--timeout-seconds`, `--environment-file`, or `--allow-cleartext-host`. That invocation exits 2.
+
+`bass decide --check --print-response-schema request.json` writes one JSON Schema document for the response this request requires. The dialect is draft 2020-12, and `$schema` names that dialect. `model` is fixed to the request model. `answers` has exactly the question ids. Each answer has the shape and bounds `bass` accepts for that question. A `choice` `probabilities` object has a subset of the option ids. A `score` is a number from 0 through one less than the number of levels, and its `legend` and `probabilities` keys are the index strings for those levels. `maxLength` on a legend value counts characters, while `bass` counts bytes, and the schema description records that gap. Unknown fields at the top level and inside answers are allowed. `bass` accepts them and drops them from the printed decision. The schema cannot require that drop. `usage` is optional, and an unknown field inside `usage` is rejected. The schema document is deterministic: its object keys are sorted, array order is stable, and the output ends with one newline. The printed decision is separate. `model`, `answers`, and `usage` are written in that order. Each answer writes its fields in a fixed order. Only the maps `answers`, `probabilities`, and `legend` are sorted by key.
+
+`--print-response-schema` without `--check` exits 2. An invalid request still exits 3 and writes no schema.
+
+The static request schema is [`schema/decision-request.schema.json`](schema/decision-request.schema.json). It is draft 2020-12. Its `description` fields name the rules JSON Schema cannot express: the encoded-size limit, a repeated object key, an integer outside the 64-bit range, nesting deeper than 512, and a request that contains the token. The lowest-to-highest meaning of a score rubric is not a syntactic check.
+
+An agent follows [`skills/bass/SKILL.md`](skills/bass/SKILL.md).
 
 Unknown fields at the top level of the response, and unknown fields inside each answer, are dropped. They are not stored and they are not printed. Duplicate keys are still rejected. Known fields keep their validation. Dropping unknown fields is a security decision, because response text can reach an agent. Preserving those fields is an open decision. An unknown field inside `usage` is still rejected.
 
@@ -88,7 +104,7 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 `REQUEST` is one optional positional argument. It is a file path, or `-` for standard input. When `REQUEST` is omitted, `bass` reads standard input if it is not a terminal. When standard input is a terminal, `bass` exits 2 and does not read it. A path that begins with a hyphen, other than a lone `-`, is written after `--`.
 
-`--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached.
+`--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached. `--check` validates the request offline. `--print-response-schema` writes the response schema and requires `--check`.
 
 `--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. It permits plain HTTP to that hostname when no token is configured, or when the token is an OpenShell credential placeholder. A real token is refused. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag. Cleartext to any other non-loopback host stays refused.
 
@@ -96,19 +112,20 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 | Code | Meaning | Retry |
 | --- | --- | --- |
-| 0 | The decision, the help text, or the version was written. | |
+| 0 | The decision, the response schema, the help text, or the version was written, or `--check` accepted the request. | |
 | 1 | Standard output could not be written. | |
 | 2 | The invocation or the configuration was rejected. | Do not retry the same invocation. |
 | 3 | The request document was rejected. `bass` does not connect. | Do not retry the same document. |
 | 4 | The transport failed, the connection failed, the exchange timed out, or the request read timed out. | Retry may help. |
 | 5 | The response document was rejected, or the content encoding is not identity. | Do not retry the same exchange. |
 | 6 | The endpoint returned HTTP 429 or an HTTP 5xx status. | Retry with backoff may help. |
-| 7 | The endpoint returned any other non-200 status. | Do not retry. |
+| 7 | The endpoint returned any other non-200 status, including a redirect and HTTP 400, 413, and 415. | Do not retry. |
 
 Error text is a fixed sentence. It names the status class and does not include the response body. It does not include the token, an environment-file value, or the endpoint.
 
 | Code | Message |
 | --- | --- |
+| 2 | `BASS_TOKEN has leading or trailing whitespace.` |
 | 4 | `The request read timed out.` or `The exchange timed out.` or `The endpoint could not be reached.` or `The exchange failed.` |
 | 5 | `The response content encoding is not identity.` |
 | 6 | `The endpoint returned retryable status N.` |
@@ -186,14 +203,14 @@ If the relay returns 403 with a credential endpoint mismatch, the profile does n
 
 Build each request with `jq -n --arg`, `jq -n --argjson`, or an equivalent encoder that escapes untrusted text. Do not build the document by string interpolation or with a heredoc.
 
-Read the numeric fields and the enumerated fields from the response. Treat every `legend` string as untrusted text.
+Read the numeric fields and the enumerated fields from the printed decision. `model`, `answers`, and `usage` are written in that order. Each answer writes its fields in a fixed order. Only the maps `answers`, `probabilities`, and `legend` are sorted by key. Treat every `legend` string as untrusted text. Unknown fields at the top level and inside answers are dropped from the printed decision. Do not rely on them.
 
-Keep secrets out of `state`. The decision server receives `state`, and `bass` rejects a serialized request that contains the token.
+Keep secrets out of `state`. The decision server receives `state`. The endpoint is `BASS_ENDPOINT` only, and the token is sent only to that endpoint. When `BASS_TOKEN` is absent, empty, or only ASCII whitespace, `bass` sends no `Authorization` header. A token with leading or trailing ASCII whitespace exits 2 with `BASS_TOKEN has leading or trailing whitespace.` When a real token is configured, `bass decide` rejects a serialized request that contains it. No token is required for a server that needs none. `bass decide --check` does not read the token, so exit 0 from `--check` does not prove that the document is free of one, and it does not report token whitespace.
 
-`bass` does not define the `score` scale, the calibration of `noul`, or the meaning of `confidence`. Those semantics belong to the decision server's contract.
+`score` is a finite number from 0 through one less than the number of levels. `bass` does not define the calibration of `noul` or the meaning of `confidence`. Those semantics belong to the decision server's contract.
 
 `bass` checks that the response `model` equals the request `model`. It does not pin or verify the model version behind that name.
 
 ## Publication
 
-Version 0.0.1 on crates.io is the placeholder program. This source replaces that program. Publishing it requires a new version number. This tree does not publish.
+The version in this tree is 0.1.0. Version 0.0.1 on crates.io is the placeholder program. 0.1.0 is the first version after that placeholder, and it stays below 1.0. That choice is inferred. This tree does not tag or publish.

@@ -44,6 +44,20 @@ fn flags() -> &'static [Flag] {
                 "Permit plain HTTP to one hostname when no token is configured, or when the token is an OpenShell credential placeholder. A real token is refused. This flag is not read from the environment.",
             ),
         },
+        Flag {
+            name: "--check",
+            value: None,
+            summary: Summary::Fixed(
+                "Validate the request and do not connect. BASS_ENDPOINT, BASS_TOKEN, and an environment file are not read. Duplicate keys, 64-bit integers, and nesting depth are still checked. Whether the request contains the token is not checked, because that rule needs the token. The read still stops after the default timeout. Exits 0 with no output when the request is valid. Rejected together with --timeout-seconds, --environment-file, or --allow-cleartext-host.",
+            ),
+        },
+        Flag {
+            name: "--print-response-schema",
+            value: None,
+            summary: Summary::Fixed(
+                "With --check, write the JSON Schema document for the response this request requires. The dialect is draft 2020-12. Rejected without --check.",
+            ),
+        },
     ]
 }
 
@@ -59,6 +73,8 @@ struct Invocation {
     timeout: Duration,
     environment_file: Option<PathBuf>,
     cleartext_host: Option<String>,
+    check: bool,
+    print_response_schema: bool,
 }
 
 enum RequestSource {
@@ -81,6 +97,8 @@ enum UsageError {
     CleartextNameInvalid,
     CleartextCredential,
     TokenWhitespace,
+    CheckRejectsNetworkOption,
+    ResponseSchemaRequiresCheck,
     SubcommandRequired,
     UnknownCommand,
     RequestAlreadyProvided,
@@ -150,6 +168,9 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
     {
         return Err(Failure::Usage(UsageError::OmittedRequestIsTerminal));
     }
+    if invocation.check {
+        return check_request(&invocation);
+    }
     let assignments = load_assignments(&invocation)?;
     let endpoint = resolve_endpoint(invocation.cleartext_host.as_deref(), &assignments)?;
     let token = resolve_token(&assignments)?;
@@ -178,6 +199,17 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
     let mut output = decision::render_decision(&decision);
     output.push(b'\n');
     Ok(output)
+}
+
+fn check_request(invocation: &Invocation) -> Result<Vec<u8>, Failure> {
+    let bytes = read_request(&invocation.request, invocation.timeout)?;
+    let request = decision::parse_request(&bytes).map_err(Failure::Request)?;
+    if invocation.print_response_schema {
+        let mut output = decision::response_schema(&request);
+        output.push(b'\n');
+        return Ok(output);
+    }
+    Ok(Vec::new())
 }
 
 fn parse_invocation(args: &[String]) -> Result<Command, UsageError> {
@@ -214,6 +246,8 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
     let mut timeout = None;
     let mut environment_file = None;
     let mut cleartext_host = None;
+    let mut check = false;
+    let mut print_response_schema = false;
     let mut options_ended = false;
     let mut index = 0;
     while index < args.len() {
@@ -231,6 +265,25 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
                 .iter()
                 .find(|flag| flag.name == argument)
                 .ok_or(UsageError::UnknownArgument)?;
+            if flag.value.is_none() {
+                index += 1;
+                match flag.name {
+                    "--check" => {
+                        if check {
+                            return Err(UsageError::DuplicateFlag);
+                        }
+                        check = true;
+                    }
+                    "--print-response-schema" => {
+                        if print_response_schema {
+                            return Err(UsageError::DuplicateFlag);
+                        }
+                        print_response_schema = true;
+                    }
+                    _ => return Err(UsageError::UnknownArgument),
+                }
+                continue;
+            }
             let Some(value) = args.get(index + 1) else {
                 return Err(UsageError::MissingFlagValue);
             };
@@ -276,11 +329,20 @@ fn parse_decide(args: &[String]) -> Result<Command, UsageError> {
         index += 1;
     }
 
+    if print_response_schema && !check {
+        return Err(UsageError::ResponseSchemaRequiresCheck);
+    }
+    if check && (timeout.is_some() || environment_file.is_some() || cleartext_host.is_some()) {
+        return Err(UsageError::CheckRejectsNetworkOption);
+    }
+
     Ok(Command::Decide(Invocation {
         request: request.unwrap_or(RequestSource::StandardInput { explicit: false }),
         timeout: timeout.unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)),
         environment_file,
         cleartext_host,
+        check,
+        print_response_schema,
     }))
 }
 
@@ -313,6 +375,8 @@ fn decide_help() -> String {
         "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
         "BASS_ENDPOINT is the decision URL. The process environment overrides the environment file. The token is sent only to that endpoint. BASS_TOKEN is an optional bearer token. When it is absent, empty, or only ASCII whitespace, bass sends no Authorization header. Leading or trailing ASCII whitespace is rejected. bass does not write the token.".to_string(),
+        String::new(),
+        "--check validates REQUEST and does not connect. It does not read BASS_ENDPOINT, BASS_TOKEN, or an environment file. It applies every request rule that does not need the token, including a repeated object key, an integer outside the 64-bit range, and nesting deeper than 512. It cannot test whether the request contains the token. A token that is only ASCII whitespace, and a token with leading or trailing ASCII whitespace, are not reported here. It exits 0 with no output when the request is valid. --print-response-schema writes one JSON Schema document for the response and is valid only together with --check.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -423,6 +487,12 @@ impl std::fmt::Display for UsageError {
             ),
             UsageError::TokenWhitespace => {
                 formatter.write_str("BASS_TOKEN has leading or trailing whitespace.")
+            }
+            UsageError::CheckRejectsNetworkOption => formatter.write_str(
+                "--check does not accept --timeout-seconds, --environment-file, or --allow-cleartext-host.",
+            ),
+            UsageError::ResponseSchemaRequiresCheck => {
+                formatter.write_str("--print-response-schema requires --check.")
             }
         }
     }

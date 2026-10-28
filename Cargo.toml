@@ -1,6 +1,6 @@
 [package]
 name = "bass"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT"
@@ -15,3 +15,14 @@ serde_json = "1"
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 # 2.5.4 and later depend on idna 1, and that line does not build on Rust 1.83.
 url = "=2.5.2"
+
+[dev-dependencies]
+# Draft 2020-12 validator for schema conformance tests. Default features are off so the
+# HTTP resolver is not compiled and does not enter the bass binary.
+# 0.20.0 is the newest jsonschema release that validates draft 2020-12 without idna 1.
+# Its time 0.3 and uuid 1 requirements are pinned to the newest releases that still
+# build on Rust 1.83. Later releases require Rust 1.85 or newer.
+jsonschema = { version = "0.20.0", default-features = false }
+time = "=0.3.45"
+deranged = "=0.5.5"
+uuid = "=1.20.0"

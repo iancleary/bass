@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "Response bass accepts for this request. Unknown fields at the top level are accepted. bass drops them from the printed decision. This schema checks the response document and cannot require that drop. bass rejects a repeated object key. This schema cannot see a repeated key, because a JSON parser keeps one value, so it is looser there. bass rejects nesting deeper than 512. Draft 2020-12 has no depth keyword. A document this schema accepts is shallower than 512, so depth does not separate the two checks on an accepted response. Where a field is looser or stricter than bass, that field's description says so.",
+  "properties": {
+    "answers": {
+      "additionalProperties": false,
+      "description": "One answer for each question id, and no other id.",
+      "properties": {
+        "eligible": {
+          "additionalProperties": true,
+          "description": "Yes-or-no probability from 0 to 1, inclusive. Unknown fields are accepted. bass drops them from the printed decision. This schema cannot require that drop.",
+          "properties": {
+            "noul": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "type": {
+              "const": "noul",
+              "type": "string"
+            }
+          },
+          "required": [
+            "noul",
+            "type"
+          ],
+          "type": "object"
+        },
+        "severity": {
+          "additionalProperties": true,
+          "description": "score is a finite number from 0 through one less than the number of levels. minimum and maximum match that range. legend and probabilities keys are the index strings for those levels. Unknown fields are accepted. bass drops them from the printed decision. This schema cannot require that drop. The legend description states the byte-versus-character gap on legend values.",
+          "properties": {
+            "confidence": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "legend": {
+              "additionalProperties": {
+                "maxLength": 65536,
+                "type": "string"
+              },
+              "description": "At most as many entries as the rubric has levels. Keys are the index strings from 0 through the last index, with no leading zero. propertyNames enum lists those strings, so the schema matches bass on keys. bass also limits each key and each value to 65536 bytes. Every allowed key is a short ASCII string, so the byte limit on keys does not separate the checks. maxLength on values counts Unicode characters, not UTF-8 bytes. The schema is looser for a value character that encodes as more than one byte. It is not stricter: every string of at most 65536 bytes has at most 65536 characters.",
+              "maxProperties": 3,
+              "propertyNames": {
+                "enum": [
+                  "0",
+                  "1",
+                  "2"
+                ]
+              },
+              "type": "object"
+            },
+            "probabilities": {
+              "additionalProperties": {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              "description": "At most as many entries as the rubric has levels. Keys are the same index strings as legend. propertyNames enum lists them, so the schema matches bass on keys. Values are probabilities from 0 to 1. The schema is neither looser nor stricter on this object.",
+              "maxProperties": 3,
+              "propertyNames": {
+                "enum": [
+                  "0",
+                  "1",
+                  "2"
+                ]
+              },
+              "type": "object"
+            },
+            "score": {
+              "description": "Finite anchor index from 0 through one less than the number of levels. minimum and maximum match bass. A JSON number is finite, so this schema is neither looser nor stricter on finiteness.",
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            "type": {
+              "const": "score",
+              "type": "string"
+            }
+          },
+          "required": [
+            "confidence",
+            "legend",
+            "probabilities",
+            "score",
+            "type"
+          ],
+          "type": "object"
+        },
+        "team": {
+          "additionalProperties": true,
+          "description": "choice is one option id from this question. probabilities keys are a subset of those option ids, and the empty object is allowed. confidence is a probability from 0 to 1. Unknown fields are accepted. bass drops them from the printed decision. This schema cannot require that drop. The probabilities description states where that object matches bass.",
+          "properties": {
+            "choice": {
+              "enum": [
+                "billing",
+                "technical"
+              ],
+              "type": "string"
+            },
+            "confidence": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "probabilities": {
+              "additionalProperties": false,
+              "description": "Keys are a subset of the option ids. additionalProperties is false and maxProperties equals the option count. A key outside the option ids is rejected, and the entry count cannot exceed the option count. This matches bass. The schema is neither looser nor stricter on this object.",
+              "maxProperties": 2,
+              "properties": {
+                "billing": {
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "technical": {
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "type": {
+              "const": "choice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "choice",
+            "confidence",
+            "probabilities",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "eligible",
+        "severity",
+        "team"
+      ],
+      "type": "object"
+    },
+    "model": {
+      "const": "demo",
+      "description": "Equal to the request model.",
+      "type": "string"
+    },
+    "usage": {
+      "additionalProperties": false,
+      "description": "Optional token counts. Unknown fields inside usage are rejected. This matches bass. usage itself may be omitted.",
+      "properties": {
+        "input_tokens": {
+          "description": "Unsigned integer from 0 through 18446744073709551615. bass accepts a JSON number only when it parses as an unsigned integer. A whole number written with a decimal point or an exponent, such as 1.0 or 1e2, is rejected by bass. JSON Schema integer cannot express that spelling.",
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "description": "Unsigned integer from 0 through 18446744073709551615. bass accepts a JSON number only when it parses as an unsigned integer. A whole number written with a decimal point or an exponent, such as 1.0 or 1e2, is rejected by bass. JSON Schema integer cannot express that spelling.",
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "answers",
+    "model"
+  ],
+  "type": "object"
+}
