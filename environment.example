@@ -1,0 +1,9 @@
+# Copy this file to the bass configuration path.
+# Remove group and other access before writing a real token.
+# Each assignment is one KEY=value line. The value is literal text.
+# Omit BASS_TOKEN, leave it empty, or use only ASCII whitespace to send no Authorization header.
+# Leading or trailing ASCII whitespace on a token is rejected.
+# The endpoint is BASS_ENDPOINT only. The token is sent only to that endpoint.
+
+BASS_ENDPOINT=https://gateway.example/v1
+BASS_TOKEN=replace-with-the-token
