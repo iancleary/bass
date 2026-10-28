@@ -122,14 +122,36 @@ fn help_beside_another_argument_exits_2() {
 }
 
 #[test]
-fn missing_token_exits_2() {
-    let output = output_of(&mut bass(&[
+fn absent_token_sends_no_authorization_header() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let mut command = bass(&[
         "decide",
         "--endpoint",
-        "http://127.0.0.1:9/decision",
-    ]));
-    assert_eq!(status_code(&output), 2);
-    assert_eq!(output.stderr, b"BASS_TOKEN is missing.\n");
+        &format!("http://{address}/decision"),
+        "--timeout-seconds",
+        "5",
+    ]);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (headers, _) = split_http(&captured);
+    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
 }
 
 #[test]
@@ -695,7 +717,7 @@ fn allowed_cleartext_host_rejects_a_real_token() {
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
     assert_eq!(
         stderr,
-        "Cleartext to a named host requires an OpenShell credential placeholder.\n"
+        "Cleartext to a named host requires no token or an OpenShell credential placeholder.\n"
     );
     assert!(!stderr.contains("live-gateway-token"));
     assert!(output.stdout.is_empty());
@@ -707,17 +729,81 @@ fn allowed_cleartext_host_rejects_a_real_token() {
 }
 
 #[test]
-fn allowed_cleartext_host_rejects_a_missing_token() {
-    let output = output_of(&mut bass(&[
+fn allowed_cleartext_host_accepts_an_absent_token() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let port = address.port();
+    let mut command = bass(&[
         "decide",
         "--allow-cleartext-host",
         "host.openshell.internal",
         "--endpoint",
-        "http://host.openshell.internal/decision",
-    ]));
-    assert_eq!(status_code(&output), 2);
-    assert_eq!(output.stderr, b"BASS_TOKEN is missing.\n");
-    assert!(output.stdout.is_empty());
+        &format!("http://host.openshell.internal:{port}/decision"),
+        "--timeout-seconds",
+        "5",
+    ]);
+    command.env("LD_PRELOAD", named_host_resolver());
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let (headers, _) = split_http(&captured);
+    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("host: host.openshell.internal:"));
+}
+
+#[test]
+fn empty_token_is_absent_and_overrides_a_file_token() {
+    let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let config = fresh_config_dir();
+    write_environment(
+        &config,
+        &format!("BASS_ENDPOINT=http://{address}/decision\nBASS_TOKEN=file-secret-token\n"),
+        0o600,
+    );
+    let mut command = command_in(&config, &["decide", "--timeout-seconds", "5"]);
+    command.env("BASS_TOKEN", "");
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn bass");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(REQUEST_DOCUMENT)
+        .expect("write request");
+    let output = child.wait_with_output().expect("wait for bass");
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!contains_bytes(&output.stdout, b"file-secret-token"));
+    assert!(!contains_bytes(&output.stderr, b"file-secret-token"));
+    let (headers, _) = split_http(&captured);
+    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+    assert!(!headers.to_ascii_lowercase().contains("file-secret-token"));
 }
 
 #[test]
@@ -1200,6 +1286,8 @@ fn retryable_and_other_statuses_use_distinct_exit_codes() {
     assert_status(503, 6, "The endpoint returned retryable status 503.\n");
     assert_status(429, 6, "The endpoint returned retryable status 429.\n");
     assert_status(404, 7, "The endpoint returned non-retryable status 404.\n");
+    assert_status(401, 7, "The endpoint returned non-retryable status 401.\n");
+    assert_status(403, 7, "The endpoint returned non-retryable status 403.\n");
 }
 
 #[test]

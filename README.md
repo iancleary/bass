@@ -2,7 +2,7 @@
 
 `bass decide` posts one decision request and prints the decision.
 
-The endpoint is a full URL you supply. No host is built into the program. The bearer token is `BASS_TOKEN`. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
+The endpoint is a full URL you supply. No host is built into the program. `BASS_TOKEN` is an optional bearer token. When it is absent or empty, `bass` sends no `Authorization` header. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
 
 ## Send a decision
 
@@ -74,11 +74,11 @@ On macOS and Linux, `bass` reads `$XDG_CONFIG_HOME/bass/environment` when `XDG_C
 
 On Unix the file mode must grant no group or other access. `600` satisfies the check. `bass` rejects the file when any group or other bit is set, including when `--endpoint` and the process environment already supply both values. Windows support covers the path only. `bass` does not inspect a Windows access control list.
 
-`--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
+`--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. An empty `BASS_TOKEN`, after that precedence, is absent, so `bass` sends no `Authorization` header and does not use a token from a lower-precedence source. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
 
 The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT`, `BASS_TOKEN`, and `BASS_TOKEN_ORIGIN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
 
-`BASS_TOKEN_ORIGIN` is an origin. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. A credential placeholder is not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred.
+`BASS_TOKEN_ORIGIN` applies only when a real token is present. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. An absent token and a credential placeholder are not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred. Treating an empty token as absent is the configured behavior. An empty process value overriding a file token follows the empty-override rule. That interaction is inferred.
 
 ## Flags
 
@@ -88,7 +88,7 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 `--endpoint URL` sets the decision URL for one invocation. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached.
 
-`--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag.
+`--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. It permits plain HTTP to that hostname when no token is configured, or when the token is an OpenShell credential placeholder. A real token is refused. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag. Cleartext to any other non-loopback host stays refused.
 
 ## Exit status
 
@@ -113,7 +113,9 @@ Error text is a fixed sentence. It names the status class and does not include t
 
 ## Limits
 
-By default, cleartext HTTP is allowed only for a loopback IP literal such as `127.0.0.1` or `::1`. A hostname, including `localhost`, is rejected unless `--allow-cleartext-host` names that host. When that flag is used, the token must be an OpenShell credential placeholder. The placeholder form is `openshell:resolve:env:` followed by one or more characters from `A` to `Z`, digits, and `_`. That form is taken from OpenShell documentation and the maintainer's existing profile. It is an inference to be confirmed. A missing token, or any other token, is rejected before a connection is opened, and the token is not written. A request whose serialized form contains the token is rejected before a connection is opened. Redirects are not followed. `HTTP_PROXY` and the related variables are not used. A URL with user information is rejected. Request and response bodies are limited to 1 MiB. The request read shares the timeout with the exchange. HTTPS uses the rustls webpki roots.
+By default, cleartext HTTP is allowed only for a loopback IP literal such as `127.0.0.1` or `::1`. A hostname, including `localhost`, is rejected unless `--allow-cleartext-host` names that host. With that flag, `bass` accepts no token or an OpenShell credential placeholder. A real token is refused before a connection, and the token is not written. The placeholder form is `openshell:resolve:env:` followed by one or more characters from `A` to `Z`, digits, and `_`. That form is taken from OpenShell documentation and the maintainer's existing profile. It is an inference to be confirmed. A request whose serialized form contains the token is rejected before a connection is opened. Redirects are not followed. `HTTP_PROXY` and the related variables are not used. A URL with user information is rejected. Request and response bodies are limited to 1 MiB. The request read shares the timeout with the exchange. HTTPS uses the rustls webpki roots.
+
+Sending no token means the request is unauthenticated. The server decides whether to accept it. HTTP 401 and HTTP 403 still exit 7. Plain HTTP over a network the operator trusts, for example an encrypted private overlay network, is the operator's responsibility. `bass` cannot verify what that network provides. This limit is inferred.
 
 A repeated object key is rejected in the request and in the response. Nesting deeper than 512 levels is rejected. This depth limit is inferred. Each `legend` string is limited to 65536 bytes. This cap is inferred. A `score` answer has at most as many `legend` entries and `probabilities` entries as the question has levels. Score probability keys are not required to match the level strings, because that key form was not observed. This is inferred. A `choice` answer has at most as many `probabilities` entries as the question has options, and those keys are a subset of the option ids. A `noul` answer has neither field. These bounds are inferred. The shared timeout that bounds the request read is inferred.
 
@@ -137,7 +139,19 @@ BASS_TOKEN_ORIGIN=https://gateway.example
 bass decide request.json
 ```
 
-On this side the default stays strict. A real token is not sent to a named host over cleartext, because that path requires the placeholder and rejects every other token before connecting.
+On this side the default stays strict. A real token is not sent to a named host over cleartext. That path accepts no token or a credential placeholder, and it rejects a real token before connecting.
+
+### A private network without a credential
+
+Omit `BASS_TOKEN`. `bass` sends no `Authorization` header. If the decision server is a named host on a network the operator trusts, pass `--allow-cleartext-host` with that hostname. `decision.overlay.example` is a documentation host. It is not a service.
+
+```
+bass decide --allow-cleartext-host decision.overlay.example \
+  --endpoint "http://decision.overlay.example:8080/decision" \
+  request.json
+```
+
+The request is unauthenticated. The server decides whether to accept it. HTTP 401 and HTTP 403 exit 7. The operator is responsible for what the network provides. `bass` cannot verify that protection. This is inferred.
 
 ### Inside an OpenShell sandbox
 

@@ -48,7 +48,7 @@ fn flags() -> &'static [Flag] {
             name: "--allow-cleartext-host",
             value: Some("NAME"),
             summary: Summary::Fixed(
-                "Permit plain HTTP to one hostname. The token must be an OpenShell credential placeholder. This flag is not read from the environment.",
+                "Permit plain HTTP to one hostname when no token is configured, or when the token is an OpenShell credential placeholder. A real token is refused. This flag is not read from the environment.",
             ),
         },
     ]
@@ -80,8 +80,6 @@ enum UsageError {
     DuplicateFlag,
     MissingFlagValue,
     BadTimeout,
-    TokenMissing,
-    TokenEmpty,
     Endpoint(transport::EndpointError),
     RequestUnreadable,
     HelpMixed,
@@ -168,22 +166,31 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
         &assignments,
     )?;
     let token = resolve_token(&assignments)?;
-    if endpoint.named_cleartext() && !token.is_credential_placeholder() {
+    if endpoint.named_cleartext()
+        && token
+            .as_ref()
+            .is_some_and(|token| !token.is_credential_placeholder())
+    {
         return Err(Failure::Usage(UsageError::CleartextCredential));
     }
-    enforce_token_origin(&endpoint, &token, &assignments)?;
+    if let Some(token) = token
+        .as_ref()
+        .filter(|token| !token.is_credential_placeholder())
+    {
+        enforce_token_origin(&endpoint, token, &assignments)?;
+    }
     let started = Instant::now();
     let bytes = read_request(&invocation.request, invocation.timeout)?;
     let request = decision::parse_request(&bytes).map_err(Failure::Request)?;
     let body = decision::render_request(&request);
-    if token.occurs_in(&body) {
+    if token.as_ref().is_some_and(|token| token.occurs_in(&body)) {
         return Err(Failure::Request(decision::RequestError::TokenInDocument));
     }
     let remaining = invocation.timeout.saturating_sub(started.elapsed());
     if remaining.is_zero() {
         return Err(Failure::Transport(transport::TransportError::Timeout));
     }
-    let response = transport::post(&endpoint, &token, &body, remaining, BODY_LIMIT)
+    let response = transport::post(&endpoint, token.as_ref(), &body, remaining, BODY_LIMIT)
         .map_err(Failure::Transport)?;
     let decision = decision::parse_decision(&response).map_err(Failure::Response)?;
     decision::check_decision(&request, &decision).map_err(Failure::Response)?;
@@ -332,7 +339,7 @@ fn decide_help() -> String {
         String::new(),
         "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
-        "BASS_TOKEN is the bearer token. BASS_TOKEN_ORIGIN is the origin that token may be sent to. When BASS_TOKEN_ORIGIN is unset, that origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. The endpoint in use must have the token origin. bass does not write the token.".to_string(),
+        "BASS_TOKEN is an optional bearer token. When it is absent or empty, bass sends no Authorization header. A real token is sent only to its origin. BASS_TOKEN_ORIGIN is that origin when set. When BASS_TOKEN_ORIGIN is unset, the origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -417,8 +424,6 @@ impl std::fmt::Display for UsageError {
             UsageError::BadTimeout => {
                 formatter.write_str("The timeout is outside the allowed range.")
             }
-            UsageError::TokenMissing => formatter.write_str("BASS_TOKEN is missing."),
-            UsageError::TokenEmpty => formatter.write_str("BASS_TOKEN is empty."),
             UsageError::Endpoint(error) => error.fmt(formatter),
             UsageError::RequestUnreadable => formatter.write_str("The request could not be read."),
             UsageError::OmittedRequestIsTerminal => {
@@ -441,7 +446,7 @@ impl std::fmt::Display for UsageError {
                 formatter.write_str("The cleartext host name is not valid.")
             }
             UsageError::CleartextCredential => formatter.write_str(
-                "Cleartext to a named host requires an OpenShell credential placeholder.",
+                "Cleartext to a named host requires no token or an OpenShell credential placeholder.",
             ),
             UsageError::TokenOriginMissing => formatter.write_str(
                 "The token origin is not configured. Set BASS_TOKEN_ORIGIN, or set BASS_ENDPOINT.",
@@ -563,15 +568,16 @@ fn require_endpoint_origin(value: &str) -> Result<transport::Origin, Failure> {
         .ok_or(Failure::Usage(UsageError::TokenOriginInvalid))
 }
 
-fn resolve_token(assignments: &environment::Assignments) -> Result<transport::Token, Failure> {
+fn resolve_token(
+    assignments: &environment::Assignments,
+) -> Result<Option<transport::Token>, Failure> {
     let value = match process_value("BASS_TOKEN")? {
         Some(value) => Some(value),
         None => assignments.token.clone(),
     };
-    match transport::token_from_env(value.as_deref()) {
-        Ok(token) => Ok(token),
-        Err(transport::TokenError::Missing) => Err(Failure::Usage(UsageError::TokenMissing)),
-        Err(transport::TokenError::Empty) => Err(Failure::Usage(UsageError::TokenEmpty)),
+    match value.as_deref() {
+        None | Some("") => Ok(None),
+        Some(text) => Ok(Some(transport::Token::new(text))),
     }
 }
 

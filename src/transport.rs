@@ -36,22 +36,9 @@ pub(super) struct Origin {
     port: u16,
 }
 
-pub(super) enum TokenError {
-    Missing,
-    Empty,
-}
-
-pub(super) fn token_from_env(value: Option<&str>) -> Result<Token, TokenError> {
-    match value {
-        None => Err(TokenError::Missing),
-        Some("") => Err(TokenError::Empty),
-        Some(text) => Ok(Token(text.to_string())),
-    }
-}
-
 pub(super) fn post(
     endpoint: &Endpoint,
-    token: &Token,
+    token: Option<&Token>,
     body: &[u8],
     timeout: Duration,
     limit: usize,
@@ -60,14 +47,15 @@ pub(super) fn post(
         .timeout(timeout)
         .redirects(0)
         .build();
-    match agent
+    let mut request = agent
         .post(endpoint.url.as_str())
-        .set("Authorization", &token.bearer())
         .set("Content-Type", "application/json")
         .set("Accept", "application/json")
-        .set("User-Agent", concat!("bass/", env!("CARGO_PKG_VERSION")))
-        .send_bytes(body)
-    {
+        .set("User-Agent", concat!("bass/", env!("CARGO_PKG_VERSION")));
+    if let Some(token) = token {
+        request = request.set("Authorization", &token.bearer());
+    }
+    match request.send_bytes(body) {
         Ok(response) => read_response(response, limit),
         Err(ureq::Error::Status(status, _response)) => status_error(status),
         Err(ureq::Error::Transport(error)) => Err(map_transport(&error)),
@@ -285,6 +273,10 @@ fn host_is_loopback(url: &Url) -> bool {
 }
 
 impl Token {
+    pub(super) fn new(text: &str) -> Self {
+        Token(text.to_string())
+    }
+
     fn bearer(&self) -> String {
         let mut value = String::from("Bearer ");
         value.push_str(&self.0);
