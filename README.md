@@ -2,7 +2,7 @@
 
 `bass decide` posts one decision request and prints the decision.
 
-The endpoint is a full URL you supply. No host is built into the program. `BASS_TOKEN` is an optional bearer token. When it is absent or empty, `bass` sends no `Authorization` header. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
+The endpoint is a full URL you supply. No host is built into the program. `BASS_TOKEN` is an optional bearer token. When it is absent, empty, or only ASCII whitespace, `bass` sends no `Authorization` header and does not read `BASS_TOKEN_ORIGIN`. A token with leading or trailing ASCII whitespace is rejected. `bass` does not accept the token as an argument, and it does not write the token or any environment-file value.
 
 ## Send a decision
 
@@ -27,7 +27,7 @@ generator | bass decide --endpoint "https://example.invalid/decision"
 
 `example.invalid` and `gateway.example` are documentation hosts. They are not services.
 
-On success, `bass` writes one JSON object and a newline to standard output, and it exits 0. Object keys in that object are sorted.
+On success, `bass` writes one JSON object and a newline to standard output, and it exits 0. The fields `model`, `answers`, and `usage` are written in that order, and each answer writes its own fields in a fixed order. The maps `answers`, `probabilities`, and `legend` are sorted by key.
 
 ## Request document
 
@@ -76,11 +76,11 @@ On macOS and Linux, `bass` reads `$XDG_CONFIG_HOME/bass/environment` when `XDG_C
 
 On Unix the file mode must grant no group or other access. `600` satisfies the check. `bass` rejects the file when any group or other bit is set, including when `--endpoint` and the process environment already supply both values. Windows support covers the path only. `bass` does not inspect a Windows access control list.
 
-`--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. An empty `BASS_TOKEN`, after that precedence, is absent, so `bass` sends no `Authorization` header and does not use a token from a lower-precedence source. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
+`--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. An empty `BASS_TOKEN`, or one that is only ASCII whitespace, after that precedence, is absent, so `bass` sends no `Authorization` header and does not use a token from a lower-precedence source. A value that contains a token and also has leading or trailing ASCII whitespace is rejected with `BASS_TOKEN has leading or trailing whitespace.` `bass` does not trim that value before use. That refusal is inferred. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
 
 The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT`, `BASS_TOKEN`, and `BASS_TOKEN_ORIGIN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
 
-`BASS_TOKEN_ORIGIN` applies only when a real token is present. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. An absent token and a credential placeholder are not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred. Treating an empty token as absent is the configured behavior. An empty process value overriding a file token follows the empty-override rule. That interaction is inferred.
+`BASS_TOKEN_ORIGIN` applies only when a real token is present. When no token is configured, `bass` does not read `BASS_TOKEN_ORIGIN`. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. An absent token and a credential placeholder are not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred. Treating an empty token as absent is the configured behavior. An empty process value overriding a file token follows the empty-override rule. That interaction is inferred.
 
 ## Flags
 

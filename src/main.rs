@@ -91,6 +91,7 @@ enum UsageError {
     TokenOriginMissing,
     TokenOriginInvalid,
     TokenOriginMismatch,
+    TokenWhitespace,
     SubcommandRequired,
     UnknownCommand,
     RequestAlreadyProvided,
@@ -340,7 +341,7 @@ fn decide_help() -> String {
         String::new(),
         "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
-        "BASS_TOKEN is an optional bearer token. When it is absent or empty, bass sends no Authorization header. A real token is sent only to its origin. BASS_TOKEN_ORIGIN is that origin when set. When BASS_TOKEN_ORIGIN is unset, the origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
+        "BASS_TOKEN is an optional bearer token. When it is absent, empty, or only ASCII whitespace, bass sends no Authorization header and does not read BASS_TOKEN_ORIGIN. Leading or trailing ASCII whitespace is rejected. A real token is sent only to its origin. BASS_TOKEN_ORIGIN is that origin when set. When BASS_TOKEN_ORIGIN is unset, the origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -457,6 +458,9 @@ impl std::fmt::Display for UsageError {
             }
             UsageError::TokenOriginMismatch => {
                 formatter.write_str("The endpoint origin differs from the token origin.")
+            }
+            UsageError::TokenWhitespace => {
+                formatter.write_str("BASS_TOKEN has leading or trailing whitespace.")
             }
         }
     }
@@ -577,8 +581,19 @@ fn resolve_token(
         None => assignments.token.clone(),
     };
     match value.as_deref() {
-        None | Some("") => Ok(None),
-        Some(text) => Ok(Some(transport::Token::new(text))),
+        None => Ok(None),
+        Some(text) => classify_token(text),
+    }
+}
+
+fn classify_token(text: &str) -> Result<Option<transport::Token>, Failure> {
+    let trimmed = text.trim_ascii();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else if trimmed.len() == text.len() {
+        Ok(Some(transport::Token::new(text)))
+    } else {
+        Err(Failure::Usage(UsageError::TokenWhitespace))
     }
 }
 

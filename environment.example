@@ -1,7 +1,9 @@
 # Copy this file to the bass configuration path.
 # Remove group and other access before writing a real token.
 # Each assignment is one KEY=value line. The value is literal text.
-# Omit BASS_TOKEN, or leave it empty, to send no Authorization header.
+# Omit BASS_TOKEN, leave it empty, or use only ASCII whitespace to send no Authorization header.
+# Leading or trailing ASCII whitespace on a token is rejected.
+# When no token is configured, BASS_TOKEN_ORIGIN is not read.
 # BASS_TOKEN_ORIGIN applies only when a real token is present.
 # BASS_TOKEN_ORIGIN is a scheme, host, and optional port. It has no path.
 

@@ -807,6 +807,67 @@ fn empty_token_is_absent_and_overrides_a_file_token() {
 }
 
 #[test]
+fn whitespace_only_token_is_absent_and_does_not_read_the_origin() {
+    for token in [" ", "\t"] {
+        let response = br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25}}}"#;
+        let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+        let mut command = bass(&[
+            "decide",
+            "--endpoint",
+            &format!("http://{address}/decision"),
+            "--timeout-seconds",
+            "5",
+        ]);
+        command.env("BASS_TOKEN", token);
+        command.env("BASS_TOKEN_ORIGIN", "not-an-origin");
+        command.stdin(Stdio::piped());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn bass");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(REQUEST_DOCUMENT)
+            .expect("write request");
+        let output = child.wait_with_output().expect("wait for bass");
+        let captured = handle.join().expect("server thread");
+        assert_eq!(
+            status_code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (headers, _) = split_http(&captured);
+        assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+    }
+}
+
+#[test]
+fn token_with_surrounding_whitespace_exits_2() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("address");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let mut command = bass(&[
+        "decide",
+        "--endpoint",
+        &format!("http://{address}/decision"),
+        "--timeout-seconds",
+        "5",
+    ]);
+    command.env("BASS_TOKEN", " secret-token ");
+    let output = output_of(&mut command);
+    assert_eq!(status_code(&output), 2);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "BASS_TOKEN has leading or trailing whitespace.\n");
+    assert!(!stderr.contains("secret-token"));
+    match listener.accept() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("expected no connection, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_different_cleartext_host_is_rejected() {
     let mut command = bass(&[
         "decide",
