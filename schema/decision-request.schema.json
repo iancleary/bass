@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Decision request accepted by bass decide. JSON Schema cannot express these bass rules. An encoding longer than 1048576 bytes: bass rejects it before parsing. A repeated object key: bass rejects it, and a JSON parser presents one value, so this schema never sees the repeat. An integer literal outside the signed 64-bit range or the unsigned 64-bit range: bass rejects that spelling, a JSON parser may widen it before this schema runs, and no maximum on one field covers every integer in the document. Nesting deeper than 512 levels: bass rejects it, and draft 2020-12 has no depth keyword. A serialized request that contains the bearer token: bass decide rejects it, the token is not a field of this document, and this schema is not given the token. bass decide --check applies the size, duplicate-key, integer, and depth rules. It does not apply the token rule, because it does not read the token.",
+  "properties": {
+    "model": {
+      "description": "Non-empty model name. bass imposes no maximum length and no character set.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "questions": {
+      "additionalProperties": {
+        "description": "A question is a union discriminated by type: noul, choice, or score. Any other type is rejected.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Yes-or-no question. criteria is optional. When present, true and false are non-empty strings. bass rejects an empty side, a missing side, null, and any other field. This object expresses those constraints.",
+            "properties": {
+              "criteria": {
+                "additionalProperties": false,
+                "properties": {
+                  "false": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "true": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": ["false", "true"],
+                "type": "object"
+              },
+              "instructions": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "const": "noul",
+                "type": "string"
+              }
+            },
+            "required": ["instructions", "type"],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Pick-one question. criteria is required.",
+            "properties": {
+              "criteria": {
+                "additionalProperties": {
+                  "description": "Non-empty description of the option.",
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "description": "From 2 to 255 options. Each property name is an option id of 1 to 100 printable ASCII characters, from space through tilde. The pattern is that rule. Every allowed character is one byte, so the pattern length matches the bass byte-length check.",
+                "maxProperties": 255,
+                "minProperties": 2,
+                "propertyNames": {
+                  "pattern": "^[ -~]{1,100}$"
+                },
+                "type": "object"
+              },
+              "instructions": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "const": "choice",
+                "type": "string"
+              }
+            },
+            "required": ["criteria", "instructions", "type"],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Rubric question. criteria is required.",
+            "properties": {
+              "criteria": {
+                "description": "From 2 to 10 non-empty strings, lowest first. bass preserves this order and does not check that the strings are ranked. JSON Schema cannot express that ranking either. The ranking is a meaning for the model, not a syntactic check.",
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "minItems": 2,
+                "type": "array"
+              },
+              "instructions": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": {
+                "const": "score",
+                "type": "string"
+              }
+            },
+            "required": ["criteria", "instructions", "type"],
+            "type": "object"
+          }
+        ]
+      },
+      "description": "From 1 to 64 questions. Each property name is a question id.",
+      "maxProperties": 64,
+      "minProperties": 1,
+      "propertyNames": {
+        "description": "1 to 100 characters from ASCII letters, digits, underscore, period, and hyphen. The pattern is that rule. Every allowed character is one byte, so the pattern length matches the bass byte-length check.",
+        "pattern": "^[A-Za-z0-9_.-]{1,100}$"
+      },
+      "type": "object"
+    },
+    "state": {
+      "description": "Any JSON value except null. An integer literal in state is still subject to the 64-bit limit described on this schema, and state may be the value that exceeds the nesting limit. This schema does not state either check.",
+      "not": {
+        "type": "null"
+      }
+    }
+  },
+  "required": ["model", "questions", "state"],
+  "title": "Decision request",
+  "type": "object"
+}

@@ -79,6 +79,8 @@ fn help_lists_the_flags_and_the_token_variable() {
         "--timeout-seconds",
         "--environment-file",
         "--allow-cleartext-host",
+        "--check",
+        "--print-response-schema",
         "REQUEST",
         "BASS_TOKEN",
         "BASS_ENDPOINT",

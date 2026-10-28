@@ -1,0 +1,16 @@
+{
+  "model": "demo",
+  "state": {
+    "ticket": 1
+  },
+  "questions": {
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should take the ticket?",
+      "criteria": {
+        "technical": "The ticket describes an outage.",
+        "billing": "The ticket describes a payment."
+      }
+    }
+  }
+}

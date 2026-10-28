@@ -1,0 +1,14 @@
+{
+  "model": "demo",
+  "state": "The applicant asked for a review.",
+  "questions": {
+    "eligible": {
+      "type": "noul",
+      "instructions": "Is the applicant eligible?",
+      "criteria": {
+        "true": "The applicant meets the stated rule.",
+        "false": "The applicant does not meet the stated rule."
+      }
+    }
+  }
+}

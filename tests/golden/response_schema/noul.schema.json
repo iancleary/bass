@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "Response bass accepts for this request. Unknown fields at the top level are accepted. bass drops them from the printed decision. This schema checks the response document and cannot require that drop. bass rejects a repeated object key. This schema cannot see a repeated key, because a JSON parser keeps one value, so it is looser there. bass rejects nesting deeper than 512. Draft 2020-12 has no depth keyword. A document this schema accepts is shallower than 512, so depth does not separate the two checks on an accepted response. Where a field is looser or stricter than bass, that field's description says so.",
+  "properties": {
+    "answers": {
+      "additionalProperties": false,
+      "description": "One answer for each question id, and no other id.",
+      "properties": {
+        "eligible": {
+          "additionalProperties": true,
+          "description": "Yes-or-no probability from 0 to 1, inclusive. Unknown fields are accepted. bass drops them from the printed decision. This schema cannot require that drop.",
+          "properties": {
+            "noul": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "type": {
+              "const": "noul",
+              "type": "string"
+            }
+          },
+          "required": [
+            "noul",
+            "type"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "eligible"
+      ],
+      "type": "object"
+    },
+    "model": {
+      "const": "demo",
+      "description": "Equal to the request model.",
+      "type": "string"
+    },
+    "usage": {
+      "additionalProperties": false,
+      "description": "Optional token counts. Unknown fields inside usage are rejected. This matches bass. usage itself may be omitted.",
+      "properties": {
+        "input_tokens": {
+          "description": "Unsigned integer from 0 through 18446744073709551615. bass accepts a JSON number only when it parses as an unsigned integer. A whole number written with a decimal point or an exponent, such as 1.0 or 1e2, is rejected by bass. JSON Schema integer cannot express that spelling.",
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_tokens": {
+          "description": "Unsigned integer from 0 through 18446744073709551615. bass accepts a JSON number only when it parses as an unsigned integer. A whole number written with a decimal point or an exponent, such as 1.0 or 1e2, is rejected by bass. JSON Schema integer cannot express that spelling.",
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "answers",
+    "model"
+  ],
+  "type": "object"
+}
