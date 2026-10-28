@@ -10,6 +10,7 @@ const MAX_CHOICES: usize = 255;
 const MIN_SCORE_LEVELS: usize = 2;
 const MAX_SCORE_LEVELS: usize = 10;
 const MAX_ID_LEN: usize = 100;
+const MAX_LEGEND_BYTES: usize = 65536;
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
 #[serde(transparent)]
@@ -122,6 +123,10 @@ pub(super) enum RequestError {
     EmptyInstructions,
     BadChoiceId,
     BodyTooLarge,
+    DuplicateKey,
+    IntegerRange,
+    Depth,
+    TokenInDocument,
 }
 
 pub(super) enum ResponseError {
@@ -139,10 +144,16 @@ pub(super) enum ResponseError {
     BadUsage,
     NotFinite,
     LegendValue,
+    DuplicateKey,
+    Depth,
+    LegendLength,
+    LegendCount,
+    ProbabilityCount,
+    ProbabilityKey,
 }
 
 pub(super) fn parse_request(bytes: &[u8]) -> Result<Request, RequestError> {
-    let value = serde_json::from_slice(bytes).map_err(|_| RequestError::NotJson)?;
+    let value = parse_json(bytes, crate::json::IntegerPolicy::RejectOversized)?;
     let mut map = expect_object(value).ok_or(RequestError::NotObject)?;
     let model = Model::new(take_string(&mut map, "model")?)?;
     let state = State::new(take_value(&mut map, "state")?)?;
@@ -158,7 +169,14 @@ pub(super) fn parse_request(bytes: &[u8]) -> Result<Request, RequestError> {
 }
 
 pub(super) fn parse_decision(bytes: &[u8]) -> Result<Decision, ResponseError> {
-    let value = serde_json::from_slice(bytes).map_err(|_| ResponseError::NotJson)?;
+    let value = match crate::json::parse(bytes, crate::json::IntegerPolicy::WidenToFloat) {
+        Ok(value) => value,
+        Err(crate::json::Error::DuplicateKey) => return Err(ResponseError::DuplicateKey),
+        Err(crate::json::Error::Depth) => return Err(ResponseError::Depth),
+        Err(crate::json::Error::Syntax | crate::json::Error::IntegerRange) => {
+            return Err(ResponseError::NotJson);
+        }
+    };
     let mut map = expect_object(value).ok_or(ResponseError::NotObject)?;
     let model = match take_string_response(&mut map, "model")? {
         text if text.is_empty() => return Err(ResponseError::MissingField),
@@ -198,15 +216,62 @@ pub(super) fn check_decision(request: &Request, decision: &Decision) -> Result<(
         if !same_kind(question, answer) {
             return Err(ResponseError::KindMismatch);
         }
-        if let (Question::Choice { criteria, .. }, Answer::Choice { choice, .. }) =
-            (question, answer)
-        {
-            if !criteria.contains_key(choice) {
-                return Err(ResponseError::ChoiceNotAllowed);
+        match (question, answer) {
+            (
+                Question::Choice { criteria, .. },
+                Answer::Choice {
+                    choice,
+                    probabilities,
+                    ..
+                },
+            ) => {
+                if !criteria.contains_key(choice) {
+                    return Err(ResponseError::ChoiceNotAllowed);
+                }
+                if probabilities.len() > criteria.len() {
+                    return Err(ResponseError::ProbabilityCount);
+                }
+                for key in probabilities.keys() {
+                    let allowed = criteria.keys().any(|candidate| candidate.0 == *key);
+                    if !allowed {
+                        return Err(ResponseError::ProbabilityKey);
+                    }
+                }
             }
+            (
+                Question::Score { criteria, .. },
+                Answer::Score {
+                    legend,
+                    probabilities,
+                    ..
+                },
+            ) => {
+                if legend.len() > criteria.len() {
+                    return Err(ResponseError::LegendCount);
+                }
+                for (key, value) in legend {
+                    if key.len() > MAX_LEGEND_BYTES || value.len() > MAX_LEGEND_BYTES {
+                        return Err(ResponseError::LegendLength);
+                    }
+                }
+                if probabilities.len() > criteria.len() {
+                    return Err(ResponseError::ProbabilityCount);
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+fn parse_json(bytes: &[u8], integers: crate::json::IntegerPolicy) -> Result<Value, RequestError> {
+    match crate::json::parse(bytes, integers) {
+        Ok(value) => Ok(value),
+        Err(crate::json::Error::Syntax) => Err(RequestError::NotJson),
+        Err(crate::json::Error::DuplicateKey) => Err(RequestError::DuplicateKey),
+        Err(crate::json::Error::IntegerRange) => Err(RequestError::IntegerRange),
+        Err(crate::json::Error::Depth) => Err(RequestError::Depth),
+    }
 }
 
 pub(super) fn render_request(request: &Request) -> Vec<u8> {
@@ -553,6 +618,10 @@ impl std::fmt::Display for RequestError {
             RequestError::EmptyInstructions => "The instructions are empty.",
             RequestError::BadChoiceId => "A choice id is outside the allowed form.",
             RequestError::BodyTooLarge => "The request is too large.",
+            RequestError::DuplicateKey => "The request repeats an object key.",
+            RequestError::IntegerRange => "An integer is outside the 64-bit range.",
+            RequestError::Depth => "The request nests too deeply.",
+            RequestError::TokenInDocument => "The request contains the token.",
         })
     }
 }
@@ -574,6 +643,14 @@ impl std::fmt::Display for ResponseError {
             ResponseError::BadUsage => "The usage counts are missing or not integers.",
             ResponseError::NotFinite => "A response number is not finite.",
             ResponseError::LegendValue => "A legend value is not a string.",
+            ResponseError::DuplicateKey => "The response repeats an object key.",
+            ResponseError::Depth => "The response nests too deeply.",
+            ResponseError::LegendLength => "A legend string exceeds 65536 bytes.",
+            ResponseError::LegendCount => "A legend has more entries than the question allows.",
+            ResponseError::ProbabilityCount => {
+                "A probability map has more entries than the question allows."
+            }
+            ResponseError::ProbabilityKey => "A probability key is outside the question criteria.",
         })
     }
 }

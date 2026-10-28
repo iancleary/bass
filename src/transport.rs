@@ -20,13 +20,20 @@ pub(super) enum EndpointError {
 }
 
 pub(super) enum TransportError {
-    Redirect { status: Option<u16> },
-    Status { status: u16 },
+    RetryableStatus { status: u16 },
+    NonRetryableStatus { status: Option<u16> },
     ContentType,
     Timeout,
     Connect,
     BodyTooLarge,
     Exchange,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Origin {
+    scheme: String,
+    host: String,
+    port: u16,
 }
 
 pub(super) enum TokenError {
@@ -69,13 +76,8 @@ pub(super) fn post(
 
 fn read_response(response: ureq::Response, limit: usize) -> Result<Vec<u8>, TransportError> {
     let status = response.status();
-    if (300..400).contains(&status) {
-        return Err(TransportError::Redirect {
-            status: Some(status),
-        });
-    }
     if status != 200 {
-        return Err(TransportError::Status { status });
+        return Err(classify_status(status));
     }
     let content_type = response.header("content-type").unwrap_or("");
     if !is_json(content_type) {
@@ -94,18 +96,22 @@ fn read_response(response: ureq::Response, limit: usize) -> Result<Vec<u8>, Tran
 }
 
 fn status_error(status: u16) -> Result<Vec<u8>, TransportError> {
-    if (300..400).contains(&status) {
-        Err(TransportError::Redirect {
-            status: Some(status),
-        })
+    Err(classify_status(status))
+}
+
+fn classify_status(status: u16) -> TransportError {
+    if status == 429 || (500..600).contains(&status) {
+        TransportError::RetryableStatus { status }
     } else {
-        Err(TransportError::Status { status })
+        TransportError::NonRetryableStatus {
+            status: Some(status),
+        }
     }
 }
 
 fn map_transport(error: &ureq::Transport) -> TransportError {
     match error.kind() {
-        ureq::ErrorKind::TooManyRedirects => TransportError::Redirect { status: None },
+        ureq::ErrorKind::TooManyRedirects => TransportError::NonRetryableStatus { status: None },
         ureq::ErrorKind::Dns
         | ureq::ErrorKind::ConnectionFailed
         | ureq::ErrorKind::ProxyConnect => TransportError::Connect,
@@ -182,6 +188,56 @@ impl Endpoint {
     pub(super) fn named_cleartext(&self) -> bool {
         self.named_cleartext
     }
+
+    pub(super) fn origin(&self) -> Origin {
+        origin_from_url(&self.url).expect("parsed endpoint has an origin")
+    }
+}
+
+pub(super) fn parse_token_origin(raw: &str) -> Option<Origin> {
+    let url = Url::parse(raw).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let path = url.path();
+    if path != "/" && !path.is_empty() {
+        return None;
+    }
+    origin_from_url(&url)
+}
+
+pub(super) fn origin_of_endpoint_setting(raw: &str) -> Option<Origin> {
+    let url = Url::parse(raw).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    if url.fragment().is_some() {
+        return None;
+    }
+    origin_from_url(&url)
+}
+
+fn origin_from_url(url: &Url) -> Option<Origin> {
+    let port = url.port_or_known_default()?;
+    let host = match url.host()? {
+        Host::Domain(name) => name.to_ascii_lowercase(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => address.to_string(),
+    };
+    Some(Origin {
+        scheme: url.scheme().to_ascii_lowercase(),
+        host,
+        port,
+    })
 }
 
 pub(super) fn normalize_hostname(raw: &str) -> Option<String> {
@@ -235,6 +291,11 @@ impl Token {
         value
     }
 
+    pub(super) fn occurs_in(&self, body: &[u8]) -> bool {
+        let needle = self.0.as_bytes();
+        !needle.is_empty() && body.windows(needle.len()).any(|window| window == needle)
+    }
+
     // The placeholder form is `openshell:resolve:env:` followed by one or more
     // characters from [A-Z0-9_]. The form is taken from OpenShell documentation
     // and the maintainer's existing profile. It is an inference to be confirmed.
@@ -271,16 +332,22 @@ impl std::fmt::Display for EndpointError {
 impl std::fmt::Display for TransportError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TransportError::Redirect {
+            TransportError::RetryableStatus { status } => {
+                write!(
+                    formatter,
+                    "The endpoint returned retryable status {status}."
+                )
+            }
+            TransportError::NonRetryableStatus {
                 status: Some(status),
             } => {
-                write!(formatter, "The endpoint returned redirect status {status}.")
+                write!(
+                    formatter,
+                    "The endpoint returned non-retryable status {status}."
+                )
             }
-            TransportError::Redirect { status: None } => {
-                formatter.write_str("The endpoint redirected the request.")
-            }
-            TransportError::Status { status } => {
-                write!(formatter, "The endpoint returned status {status}.")
+            TransportError::NonRetryableStatus { status: None } => {
+                formatter.write_str("The endpoint returned a non-retryable status.")
             }
             TransportError::ContentType => {
                 formatter.write_str("The response content type is not JSON.")

@@ -41,6 +41,8 @@ A `choice` question picks one option. `criteria` is an object of 2 to 255 option
 
 A `score` question rates the state on an ordered rubric. `criteria` is an array of 2 to 10 non-empty strings, lowest first.
 
+`bass` parses the request and sends it again in canonical form. Object keys are written in sorted order. `state` is that canonical JSON, not the original bytes. An integer literal outside the signed 64-bit range or the unsigned 64-bit range is rejected. A repeated object key is rejected.
+
 ```json
 {
   "model": "demo",
@@ -74,7 +76,9 @@ On Unix the file mode must grant no group or other access. `600` satisfies the c
 
 `--endpoint` overrides `BASS_ENDPOINT` in the process environment. The process environment overrides the file. `BASS_TOKEN` in the process environment overrides the file. An empty process value still overrides the file. When no source supplies an endpoint, `bass` exits 2 and writes `An endpoint is required.` The cleartext host allowance is not one of these keys.
 
-The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT` and `BASS_TOKEN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
+The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes one carriage return immediately before a line feed. It ignores a line that is empty or contains only spaces and tabs. It ignores a line whose first character, after spaces and tabs, is `#`. Every other line has the form `KEY=value`. The key is the text before the first `=` and contains no spaces. The value is the rest of the line and is literal. Quotes, dollar signs, and backticks stay as characters. `bass` does not expand them and does not execute them. A `#` later in the line does not start a comment. The allowed keys are `BASS_ENDPOINT`, `BASS_TOKEN`, and `BASS_TOKEN_ORIGIN`. A repeated key is rejected. Any other key is rejected. The model remains a field of the request document.
+
+`BASS_TOKEN_ORIGIN` is an origin. It has a scheme, a host, and an optional port, and it has no path. A trailing slash is accepted. Any other path is rejected. When `BASS_TOKEN_ORIGIN` is set, in the process environment or in the file, that origin is the only origin to which `bass` sends the token. The process value overrides the file. When it is unset, `bass` uses the origin of `BASS_ENDPOINT` from the process environment or the file. The endpoint in use, including an endpoint given by `--endpoint`, must have that origin. Host comparison ignores ASCII case, and an omitted port is the scheme default. A credential placeholder is not bound to an origin. This binding is inferred. Acceptance of a trailing slash is inferred.
 
 ## Flags
 
@@ -82,24 +86,36 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 
 `REQUEST` is one optional positional argument. It is a file path, or `-` for standard input. When `REQUEST` is omitted, `bass` reads standard input if it is not a terminal. When standard input is a terminal, `bass` exits 2 and does not read it. A path that begins with a hyphen, other than a lone `-`, is written after `--`.
 
-`--endpoint URL` sets the decision URL for one invocation. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` stops the exchange after N seconds. The default is 60. The maximum is 600.
+`--endpoint URL` sets the decision URL for one invocation. `--environment-file PATH` selects an environment file. `--allow-cleartext-host NAME` permits plain HTTP to one hostname. `--timeout-seconds N` bounds the request read and the exchange together. The default is 60. The maximum is 600. An idle pipe exits 4 when that limit is reached.
 
 `--allow-cleartext-host` is accepted once. It is read only from the command line. A process variable or an environment-file key does not enable it, and an unknown file key is rejected. The name matches one hostname after normalization. There is no wildcard, suffix, prefix, or address range. One trailing dot is removed, then ASCII letters are compared without regard to case. A second trailing dot does not match. An IP address is not a valid name. Loopback IP literals stay allowed without this flag.
 
 ## Exit status
 
-- 0 means the decision, the help text, or the version was written.
-- 1 means standard output could not be written.
-- 2 means the invocation was rejected.
-- 3 means the request document was rejected. `bass` does not connect.
-- 4 means the exchange failed.
-- 5 means the response document was rejected.
+| Code | Meaning | Retry |
+| --- | --- | --- |
+| 0 | The decision, the help text, or the version was written. | |
+| 1 | Standard output could not be written. | |
+| 2 | The invocation or the configuration was rejected. | Do not retry the same invocation. |
+| 3 | The request document was rejected. `bass` does not connect. | Do not retry the same document. |
+| 4 | The transport failed, the connection failed, the exchange timed out, or the request read timed out. | Retry may help. |
+| 5 | The response document was rejected. | Do not retry the same exchange. |
+| 6 | The endpoint returned HTTP 429 or an HTTP 5xx status. | Retry with backoff may help. |
+| 7 | The endpoint returned any other non-200 status. | Do not retry. |
 
-Error text is a fixed sentence. It does not include the token, an environment-file value, the response body, or the endpoint.
+Error text is a fixed sentence. It names the status class and does not include the response body. It does not include the token, an environment-file value, or the endpoint.
+
+| Code | Message |
+| --- | --- |
+| 4 | `The request read timed out.` or `The exchange timed out.` or `The endpoint could not be reached.` or `The exchange failed.` |
+| 6 | `The endpoint returned retryable status N.` |
+| 7 | `The endpoint returned non-retryable status N.` |
 
 ## Limits
 
-By default, cleartext HTTP is allowed only for a loopback IP literal such as `127.0.0.1` or `::1`. A hostname, including `localhost`, is rejected unless `--allow-cleartext-host` names that host. When that flag is used, the token must be an OpenShell credential placeholder. The placeholder form is `openshell:resolve:env:` followed by one or more characters from `A` to `Z`, digits, and `_`. That form is taken from OpenShell documentation and the maintainer's existing profile. It is an inference to be confirmed. A missing token, or any other token, is rejected before a connection is opened, and the token is not written. Redirects are not followed. `HTTP_PROXY` and the related variables are not used. A URL with user information is rejected. Request and response bodies are limited to 1 MiB. HTTPS uses the rustls webpki roots.
+By default, cleartext HTTP is allowed only for a loopback IP literal such as `127.0.0.1` or `::1`. A hostname, including `localhost`, is rejected unless `--allow-cleartext-host` names that host. When that flag is used, the token must be an OpenShell credential placeholder. The placeholder form is `openshell:resolve:env:` followed by one or more characters from `A` to `Z`, digits, and `_`. That form is taken from OpenShell documentation and the maintainer's existing profile. It is an inference to be confirmed. A missing token, or any other token, is rejected before a connection is opened, and the token is not written. A request whose serialized form contains the token is rejected before a connection is opened. Redirects are not followed. `HTTP_PROXY` and the related variables are not used. A URL with user information is rejected. Request and response bodies are limited to 1 MiB. The request read shares the timeout with the exchange. HTTPS uses the rustls webpki roots.
+
+A repeated object key is rejected in the request and in the response. Nesting deeper than 512 levels is rejected. This depth limit is inferred. Each `legend` string is limited to 65536 bytes. This cap is inferred. A `score` answer has at most as many `legend` entries and `probabilities` entries as the question has levels. Score probability keys are not required to match the level strings, because that key form was not observed. This is inferred. A `choice` answer has at most as many `probabilities` entries as the question has options, and those keys are a subset of the option ids. A `noul` answer has neither field. These bounds are inferred. The shared timeout that bounds the request read is inferred.
 
 ## Supported deployments
 
@@ -114,6 +130,7 @@ The real token stays in the mode `600` environment file or in the process enviro
 # %APPDATA%\bass\environment on Windows when XDG_CONFIG_HOME is unset.
 BASS_ENDPOINT=https://gateway.example/v1
 BASS_TOKEN=replace-with-the-token
+BASS_TOKEN_ORIGIN=https://gateway.example
 ```
 
 ```
@@ -135,7 +152,19 @@ bass decide --allow-cleartext-host host.openshell.internal \
 
 The following statements about OpenShell were not verified from this repository. They are inferred from OpenShell documentation and the maintainer's existing profile. The OpenShell proxy substitutes the real credential only when its policy permits the binary, host, port, path, and method. A compromised sandbox therefore yields only the call that policy already allows. Adding `bass` to the allowed binaries adds no new class of access beyond the other binaries that policy already permits. Narrow the profile to the decision path and to POST only. That is a recommendation for the profile owner. `bass` does not enforce the profile.
 
-If the relay returns 403 with a credential endpoint mismatch, the profile does not permit this binary, host, port, path, or method. Adjust the profile. Do not replace the placeholder with a real token inside the sandbox.
+If the relay returns 403 with a credential endpoint mismatch, the profile does not permit this binary, host, port, path, or method. Adjust the profile. Do not replace the placeholder with a real token inside the sandbox. A credential placeholder is not bound to a token origin.
+
+## Using bass from an agent skill
+
+Build each request with `jq -n --arg`, `jq -n --argjson`, or an equivalent encoder that escapes untrusted text. Do not build the document by string interpolation or with a heredoc.
+
+Read the numeric fields and the enumerated fields from the response. Treat every `legend` string as untrusted text.
+
+Keep secrets out of `state`. The decision server receives `state`, and `bass` rejects a serialized request that contains the token.
+
+`bass` does not define the `score` scale, the calibration of `noul`, or the meaning of `confidence`. Those semantics belong to the decision server's contract.
+
+`bass` checks that the response `model` equals the request `model`. It does not pin or verify the model version behind that name.
 
 ## Publication
 

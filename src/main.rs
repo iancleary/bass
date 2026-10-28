@@ -1,11 +1,12 @@
 mod decision;
 mod environment;
+mod json;
 mod transport;
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BODY_LIMIT: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -89,6 +90,9 @@ enum UsageError {
     Environment(environment::FileError),
     CleartextNameInvalid,
     CleartextCredential,
+    TokenOriginMissing,
+    TokenOriginInvalid,
+    TokenOriginMismatch,
     SubcommandRequired,
     UnknownCommand,
     RequestAlreadyProvided,
@@ -98,6 +102,7 @@ enum UsageError {
 enum Failure {
     Usage(UsageError),
     Request(decision::RequestError),
+    RequestTimeout,
     Transport(transport::TransportError),
     Response(decision::ResponseError),
 }
@@ -105,6 +110,7 @@ enum Failure {
 enum LimitedRead {
     TooLarge,
     Io,
+    TimedOut,
 }
 
 fn main() -> ExitCode {
@@ -127,7 +133,12 @@ fn exit_code(failure: &Failure) -> u8 {
     match failure {
         Failure::Usage(_) => 2,
         Failure::Request(_) => 3,
-        Failure::Transport(_) => 4,
+        Failure::RequestTimeout => 4,
+        Failure::Transport(error) => match error {
+            transport::TransportError::RetryableStatus { .. } => 6,
+            transport::TransportError::NonRetryableStatus { .. } => 7,
+            _ => 4,
+        },
         Failure::Response(_) => 5,
     }
 }
@@ -160,10 +171,19 @@ fn decide(invocation: Invocation) -> Result<Vec<u8>, Failure> {
     if endpoint.named_cleartext() && !token.is_credential_placeholder() {
         return Err(Failure::Usage(UsageError::CleartextCredential));
     }
-    let bytes = read_request(&invocation.request)?;
+    enforce_token_origin(&endpoint, &token, &assignments)?;
+    let started = Instant::now();
+    let bytes = read_request(&invocation.request, invocation.timeout)?;
     let request = decision::parse_request(&bytes).map_err(Failure::Request)?;
     let body = decision::render_request(&request);
-    let response = transport::post(&endpoint, &token, &body, invocation.timeout, BODY_LIMIT)
+    if token.occurs_in(&body) {
+        return Err(Failure::Request(decision::RequestError::TokenInDocument));
+    }
+    let remaining = invocation.timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(Failure::Transport(transport::TransportError::Timeout));
+    }
+    let response = transport::post(&endpoint, &token, &body, remaining, BODY_LIMIT)
         .map_err(Failure::Transport)?;
     let decision = decision::parse_decision(&response).map_err(Failure::Response)?;
     decision::check_decision(&request, &decision).map_err(Failure::Response)?;
@@ -312,7 +332,7 @@ fn decide_help() -> String {
         String::new(),
         "REQUEST is a file path, or - for standard input. When REQUEST is omitted, bass reads standard input if it is not a terminal. A terminal exits 2. A path that begins with a hyphen is written after --.".to_string(),
         String::new(),
-        "BASS_TOKEN is the bearer token. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. bass does not write the token.".to_string(),
+        "BASS_TOKEN is the bearer token. BASS_TOKEN_ORIGIN is the origin that token may be sent to. When BASS_TOKEN_ORIGIN is unset, that origin is taken from BASS_ENDPOINT. BASS_ENDPOINT is the decision URL. A flag overrides the process environment, which overrides the environment file. The endpoint in use must have the token origin. bass does not write the token.".to_string(),
         String::new(),
     ];
     for flag in flags() {
@@ -323,7 +343,7 @@ fn decide_help() -> String {
         let detail = match flag.summary {
             Summary::Fixed(text) => text.to_string(),
             Summary::Timeout => format!(
-                "Stop after N seconds. The default is {DEFAULT_TIMEOUT_SECONDS}. The maximum is {MAX_TIMEOUT_SECONDS}."
+                "Stop the request read and the exchange after N seconds in total. The default is {DEFAULT_TIMEOUT_SECONDS}. The maximum is {MAX_TIMEOUT_SECONDS}."
             ),
         };
         lines.push(label);
@@ -333,21 +353,37 @@ fn decide_help() -> String {
     lines.join("\n")
 }
 
-fn read_request(source: &RequestSource) -> Result<Vec<u8>, Failure> {
+fn read_request(source: &RequestSource, timeout: Duration) -> Result<Vec<u8>, Failure> {
     let result = match source {
         RequestSource::Path(path) => {
             let file = match std::fs::File::open(path) {
                 Ok(file) => file,
                 Err(_) => return Err(Failure::Usage(UsageError::RequestUnreadable)),
             };
-            read_limited(file)
+            read_bounded(file, timeout)
         }
-        RequestSource::StandardInput { .. } => read_limited(std::io::stdin()),
+        RequestSource::StandardInput { .. } => read_bounded(std::io::stdin(), timeout),
     };
     match result {
         Ok(bytes) => Ok(bytes),
         Err(LimitedRead::TooLarge) => Err(Failure::Request(decision::RequestError::BodyTooLarge)),
         Err(LimitedRead::Io) => Err(Failure::Usage(UsageError::RequestUnreadable)),
+        Err(LimitedRead::TimedOut) => Err(Failure::RequestTimeout),
+    }
+}
+
+fn read_bounded(
+    reader: impl Read + Send + 'static,
+    timeout: Duration,
+) -> Result<Vec<u8>, LimitedRead> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_limited(reader));
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(LimitedRead::TimedOut),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(LimitedRead::Io),
     }
 }
 
@@ -407,6 +443,15 @@ impl std::fmt::Display for UsageError {
             UsageError::CleartextCredential => formatter.write_str(
                 "Cleartext to a named host requires an OpenShell credential placeholder.",
             ),
+            UsageError::TokenOriginMissing => formatter.write_str(
+                "The token origin is not configured. Set BASS_TOKEN_ORIGIN, or set BASS_ENDPOINT.",
+            ),
+            UsageError::TokenOriginInvalid => {
+                formatter.write_str("The token origin is not an origin.")
+            }
+            UsageError::TokenOriginMismatch => {
+                formatter.write_str("The endpoint origin differs from the token origin.")
+            }
         }
     }
 }
@@ -424,6 +469,7 @@ fn load_assignments(invocation: &Invocation) -> Result<environment::Assignments,
         Ok(None) => Ok(environment::Assignments {
             endpoint: None,
             token: None,
+            token_origin: None,
         }),
         Err(error) => Err(Failure::Usage(UsageError::Environment(error))),
     }
@@ -475,6 +521,48 @@ fn resolve_endpoint(
         .map_err(|error| Failure::Usage(UsageError::Endpoint(error)))
 }
 
+fn enforce_token_origin(
+    endpoint: &transport::Endpoint,
+    token: &transport::Token,
+    assignments: &environment::Assignments,
+) -> Result<(), Failure> {
+    if token.is_credential_placeholder() {
+        return Ok(());
+    }
+    match configured_token_origin(assignments)? {
+        Some(origin) if origin == endpoint.origin() => Ok(()),
+        Some(_) => Err(Failure::Usage(UsageError::TokenOriginMismatch)),
+        None => Err(Failure::Usage(UsageError::TokenOriginMissing)),
+    }
+}
+
+fn configured_token_origin(
+    assignments: &environment::Assignments,
+) -> Result<Option<transport::Origin>, Failure> {
+    if let Some(value) = process_value("BASS_TOKEN_ORIGIN")? {
+        return Ok(Some(require_token_origin(&value)?));
+    }
+    if let Some(value) = &assignments.token_origin {
+        return Ok(Some(require_token_origin(value)?));
+    }
+    if let Some(value) = process_value("BASS_ENDPOINT")? {
+        return Ok(Some(require_endpoint_origin(&value)?));
+    }
+    if let Some(value) = &assignments.endpoint {
+        return Ok(Some(require_endpoint_origin(value)?));
+    }
+    Ok(None)
+}
+
+fn require_token_origin(value: &str) -> Result<transport::Origin, Failure> {
+    transport::parse_token_origin(value).ok_or(Failure::Usage(UsageError::TokenOriginInvalid))
+}
+
+fn require_endpoint_origin(value: &str) -> Result<transport::Origin, Failure> {
+    transport::origin_of_endpoint_setting(value)
+        .ok_or(Failure::Usage(UsageError::TokenOriginInvalid))
+}
+
 fn resolve_token(assignments: &environment::Assignments) -> Result<transport::Token, Failure> {
     let value = match process_value("BASS_TOKEN")? {
         Some(value) => Some(value),
@@ -502,6 +590,7 @@ impl std::fmt::Display for Failure {
         match self {
             Failure::Usage(error) => error.fmt(formatter),
             Failure::Request(error) => error.fmt(formatter),
+            Failure::RequestTimeout => formatter.write_str("The request read timed out."),
             Failure::Transport(error) => error.fmt(formatter),
             Failure::Response(error) => error.fmt(formatter),
         }
