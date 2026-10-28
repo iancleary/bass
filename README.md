@@ -58,13 +58,15 @@ A `score` question rates the state on an ordered rubric. `criteria` is an array 
 
 ## Response document
 
-The response is one JSON object with `model` and `answers`. `usage` is optional. When present, it has integer fields `input_tokens` and `output_tokens`.
+The response is one JSON object with `model` and `answers`. `usage` is optional. When present, it has integer fields `input_tokens` and `output_tokens`, each a non-negative integer. `output_tokens` may be 0. The decision server's gateway documentation says `usage` is always present. That statement was not verified against a live server. This is inferred. `bass` still accepts a response that omits `usage`.
 
 `model` must equal the request model. Every question has one answer of the same type, and every answer id is a question id.
 
-A `noul` answer has `noul`, a probability from 0 to 1. A `choice` answer has `choice`, `probabilities`, and `confidence`. `choice` is one of the option ids you sent. A `score` answer has `score`, `legend`, `probabilities`, and `confidence`. `score` is a finite number. Probabilities and confidence are numbers from 0 to 1. Legend values are strings.
+A `noul` answer has `noul`, a probability from 0 to 1. A `choice` answer has `choice`, `probabilities`, and `confidence`. `choice` is one of the option ids you sent. The decision server's documentation says those probabilities cover every option id. `bass` accepts a subset and rejects a key outside the option ids. That tolerance is deliberate. A `score` answer has `score`, `legend`, `probabilities`, and `confidence`. `score` is the probability-weighted anchor index, a finite number from 0 through one less than the number of levels in the request. It is not a 0 to 1 scale. `legend` and `probabilities` keys, when present, are the decimal index strings `0` through that last index, without a leading zero. Legend values are strings. Probabilities and confidence are numbers from 0 to 1. This score rule is inferred from the decision server's gateway documentation and was not verified against a live server.
 
-`bass` accepts HTTP 200 and a content type of `application/json`. It prints the parsed decision, not the raw response bytes.
+Unknown fields at the top level of the response, and unknown fields inside each answer, are dropped. They are not stored and they are not printed. Duplicate keys are still rejected. Known fields keep their validation. Dropping unknown fields is a security decision, because response text can reach an agent. Preserving those fields is an open decision. An unknown field inside `usage` is still rejected.
+
+`bass` sends `Accept: application/json` and `Accept-Encoding: identity`. It accepts HTTP 200 and a content type of `application/json`. A `Content-Encoding` other than `identity` exits 5 with `The response content encoding is not identity.` A missing `Content-Encoding` is identity. That exit is a decision: a retry does not change a stable coding, so the response is invalid rather than a transport failure. `bass` prints the parsed decision, not the raw response bytes.
 
 ## Environment file
 
@@ -99,7 +101,7 @@ The file is UTF-8 and at most 64 KiB. `bass` splits it on line feeds and removes
 | 2 | The invocation or the configuration was rejected. | Do not retry the same invocation. |
 | 3 | The request document was rejected. `bass` does not connect. | Do not retry the same document. |
 | 4 | The transport failed, the connection failed, the exchange timed out, or the request read timed out. | Retry may help. |
-| 5 | The response document was rejected. | Do not retry the same exchange. |
+| 5 | The response document was rejected, or the content encoding is not identity. | Do not retry the same exchange. |
 | 6 | The endpoint returned HTTP 429 or an HTTP 5xx status. | Retry with backoff may help. |
 | 7 | The endpoint returned any other non-200 status. | Do not retry. |
 
@@ -108,6 +110,7 @@ Error text is a fixed sentence. It names the status class and does not include t
 | Code | Message |
 | --- | --- |
 | 4 | `The request read timed out.` or `The exchange timed out.` or `The endpoint could not be reached.` or `The exchange failed.` |
+| 5 | `The response content encoding is not identity.` |
 | 6 | `The endpoint returned retryable status N.` |
 | 7 | `The endpoint returned non-retryable status N.` |
 
@@ -117,7 +120,19 @@ By default, cleartext HTTP is allowed only for a loopback IP literal such as `12
 
 Sending no token means the request is unauthenticated. The server decides whether to accept it. HTTP 401 and HTTP 403 still exit 7. Plain HTTP over a network the operator trusts, for example an encrypted private overlay network, is the operator's responsibility. `bass` cannot verify what that network provides. This limit is inferred.
 
-A repeated object key is rejected in the request and in the response. Nesting deeper than 512 levels is rejected. This depth limit is inferred. Each `legend` string is limited to 65536 bytes. This cap is inferred. A `score` answer has at most as many `legend` entries and `probabilities` entries as the question has levels. Score probability keys are not required to match the level strings, because that key form was not observed. This is inferred. A `choice` answer has at most as many `probabilities` entries as the question has options, and those keys are a subset of the option ids. A `noul` answer has neither field. These bounds are inferred. The shared timeout that bounds the request read is inferred.
+A repeated object key is rejected in the request and in the response. Nesting deeper than 512 levels is rejected. This depth limit is inferred. Each `legend` string is limited to 65536 bytes. This cap is inferred. A `score` answer has at most as many `legend` entries and `probabilities` entries as the question has levels. Those keys must be anchor index strings. This is inferred from the decision server's gateway documentation. A `choice` answer has at most as many `probabilities` entries as the question has options, and those keys are a subset of the option ids. The shared timeout that bounds the request read is inferred.
+
+The decision server's gateway documentation states limits that are stricter than the checks `bass` applies to a request. They were not verified against a live server. This is inferred. `bass` does not enforce them. A request the server rejects is reported from the HTTP status. HTTP 400, 413, and 415 exit 7 with `The endpoint returned non-retryable status N.`
+
+| Decision server limit | `bass` check |
+| --- | --- |
+| Request body at most 262144 bytes | 1 MiB |
+| `state` at most 16 levels deep | 512 levels |
+| Question ids of 1 to 128 characters | 1 to 100 characters |
+| 1 to 64 questions | 1 to 64 questions |
+| 1 to 64 choice options | 2 to 255 choice options |
+| 1 to 64 score anchors | 2 to 10 score levels |
+| Instructions at most 8192 characters | No separate instruction cap |
 
 ## Supported deployments
 

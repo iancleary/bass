@@ -150,6 +150,9 @@ pub(super) enum ResponseError {
     LegendCount,
     ProbabilityCount,
     ProbabilityKey,
+    ScoreRange,
+    LegendKey,
+    ScoreProbabilityKey,
 }
 
 pub(super) fn parse_request(bytes: &[u8]) -> Result<Request, RequestError> {
@@ -187,9 +190,6 @@ pub(super) fn parse_decision(bytes: &[u8]) -> Result<Decision, ResponseError> {
         None => None,
         Some(value) => Some(parse_usage(value)?),
     };
-    if !map.is_empty() {
-        return Err(ResponseError::UnknownField);
-    }
     Ok(Decision {
         model,
         answers,
@@ -241,21 +241,34 @@ pub(super) fn check_decision(request: &Request, decision: &Decision) -> Result<(
             (
                 Question::Score { criteria, .. },
                 Answer::Score {
+                    score,
                     legend,
                     probabilities,
                     ..
                 },
             ) => {
-                if legend.len() > criteria.len() {
+                let levels = criteria.len();
+                if !score_in_anchor_range(score.0, levels) {
+                    return Err(ResponseError::ScoreRange);
+                }
+                if legend.len() > levels {
                     return Err(ResponseError::LegendCount);
                 }
                 for (key, value) in legend {
                     if key.len() > MAX_LEGEND_BYTES || value.len() > MAX_LEGEND_BYTES {
                         return Err(ResponseError::LegendLength);
                     }
+                    if !is_anchor_index(key, levels) {
+                        return Err(ResponseError::LegendKey);
+                    }
                 }
-                if probabilities.len() > criteria.len() {
+                if probabilities.len() > levels {
                     return Err(ResponseError::ProbabilityCount);
+                }
+                for key in probabilities.keys() {
+                    if !is_anchor_index(key, levels) {
+                        return Err(ResponseError::ScoreProbabilityKey);
+                    }
                 }
             }
             _ => {}
@@ -410,9 +423,6 @@ fn parse_answer(value: Value) -> Result<Answer, ResponseError> {
     match type_name.as_str() {
         "noul" => {
             let noul = expect_probability(&take_value_response(&mut map, "noul")?)?;
-            if !map.is_empty() {
-                return Err(ResponseError::UnknownField);
-            }
             Ok(Answer::Noul { noul })
         }
         "choice" => {
@@ -421,9 +431,6 @@ fn parse_answer(value: Value) -> Result<Answer, ResponseError> {
             let probabilities =
                 parse_probability_map(take_value_response(&mut map, "probabilities")?)?;
             let confidence = expect_probability(&take_value_response(&mut map, "confidence")?)?;
-            if !map.is_empty() {
-                return Err(ResponseError::UnknownField);
-            }
             Ok(Answer::Choice {
                 choice,
                 probabilities,
@@ -436,9 +443,6 @@ fn parse_answer(value: Value) -> Result<Answer, ResponseError> {
             let probabilities =
                 parse_probability_map(take_value_response(&mut map, "probabilities")?)?;
             let confidence = expect_probability(&take_value_response(&mut map, "confidence")?)?;
-            if !map.is_empty() {
-                return Err(ResponseError::UnknownField);
-            }
             Ok(Answer::Score {
                 score,
                 legend,
@@ -487,6 +491,27 @@ fn parse_usage(value: Value) -> Result<Usage, ResponseError> {
         input_tokens,
         output_tokens,
     })
+}
+
+fn score_in_anchor_range(score: f64, levels: usize) -> bool {
+    if levels == 0 {
+        return false;
+    }
+    let last = (levels - 1) as f64;
+    (0.0..=last).contains(&score)
+}
+
+fn is_anchor_index(key: &str, levels: usize) -> bool {
+    if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    if key.len() > 1 && key.starts_with('0') {
+        return false;
+    }
+    match key.parse::<usize>() {
+        Ok(index) => index < levels,
+        Err(_) => false,
+    }
 }
 
 fn same_kind(question: &Question, answer: &Answer) -> bool {
@@ -651,6 +676,11 @@ impl std::fmt::Display for ResponseError {
                 "A probability map has more entries than the question allows."
             }
             ResponseError::ProbabilityKey => "A probability key is outside the question criteria.",
+            ResponseError::ScoreRange => "The score is outside the anchor index range.",
+            ResponseError::LegendKey => "A legend key is outside the anchor index range.",
+            ResponseError::ScoreProbabilityKey => {
+                "A score probability key is outside the anchor index range."
+            }
         })
     }
 }

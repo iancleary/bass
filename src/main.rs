@@ -135,6 +135,7 @@ fn exit_code(failure: &Failure) -> u8 {
         Failure::Transport(error) => match error {
             transport::TransportError::RetryableStatus { .. } => 6,
             transport::TransportError::NonRetryableStatus { .. } => 7,
+            transport::TransportError::ContentEncoding => 5,
             _ => 4,
         },
         Failure::Response(_) => 5,

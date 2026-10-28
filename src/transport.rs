@@ -23,6 +23,7 @@ pub(super) enum TransportError {
     RetryableStatus { status: u16 },
     NonRetryableStatus { status: Option<u16> },
     ContentType,
+    ContentEncoding,
     Timeout,
     Connect,
     BodyTooLarge,
@@ -51,6 +52,7 @@ pub(super) fn post(
         .post(endpoint.url.as_str())
         .set("Content-Type", "application/json")
         .set("Accept", "application/json")
+        .set("Accept-Encoding", "identity")
         .set("User-Agent", concat!("bass/", env!("CARGO_PKG_VERSION")));
     if let Some(token) = token {
         request = request.set("Authorization", &token.bearer());
@@ -70,6 +72,11 @@ fn read_response(response: ureq::Response, limit: usize) -> Result<Vec<u8>, Tran
     let content_type = response.header("content-type").unwrap_or("");
     if !is_json(content_type) {
         return Err(TransportError::ContentType);
+    }
+    if let Some(encoding) = response.header("content-encoding") {
+        if !encoding.trim().eq_ignore_ascii_case("identity") {
+            return Err(TransportError::ContentEncoding);
+        }
     }
     let mut buffer = Vec::new();
     response
@@ -343,6 +350,9 @@ impl std::fmt::Display for TransportError {
             }
             TransportError::ContentType => {
                 formatter.write_str("The response content type is not JSON.")
+            }
+            TransportError::ContentEncoding => {
+                formatter.write_str("The response content encoding is not identity.")
             }
             TransportError::Timeout => formatter.write_str("The exchange timed out."),
             TransportError::Connect => formatter.write_str("The endpoint could not be reached."),

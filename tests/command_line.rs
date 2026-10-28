@@ -1233,7 +1233,7 @@ fn response_legend_and_probabilities_are_bounded() {
     let choice_request = br#"{"model":"demo","state":"pending","questions":{"team":{"type":"choice","instructions":"Which team?","criteria":{"billing":"Payments","technical":"Outages"}}}}"#;
     let long = "x".repeat(65537);
     let long_legend = format!(
-        r#"{{"model":"demo","answers":{{"severity":{{"type":"score","score":1,"legend":{{"low":"{long}"}},"probabilities":{{"0":1}},"confidence":1}}}}}}"#
+        r#"{{"model":"demo","answers":{{"severity":{{"type":"score","score":1,"legend":{{"0":"{long}"}},"probabilities":{{"0":1}},"confidence":1}}}}}}"#
     );
     assert_response(
         score_request,
@@ -1249,7 +1249,7 @@ fn response_legend_and_probabilities_are_bounded() {
     );
     assert_response(
         score_request,
-        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"low":"minor"},"probabilities":{"0":0.2,"1":0.3,"2":0.5},"confidence":1}}}"#,
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"0":"minor"},"probabilities":{"0":0.2,"1":0.3,"2":0.5},"confidence":1}}}"#,
         5,
         "A probability map has more entries than the question allows.\n",
     );
@@ -1259,17 +1259,10 @@ fn response_legend_and_probabilities_are_bounded() {
         5,
         "A probability key is outside the question criteria.\n",
     );
-    assert_response(
-        REQUEST_DOCUMENT,
-        br#"{"model":"demo","answers":{"eligible":{"type":"noul","noul":0.25,"probabilities":{"yes":1}}}}"#,
-        5,
-        "The response has an unknown field.\n",
-    );
-
     let (address, handle) = serve(
         200,
         "Content-Type: application/json\r\n",
-        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"low":"minor","high":"major"},"probabilities":{"0":0.25,"1":0.75},"confidence":0.5}}}"#,
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"0":"minor","1":"major"},"probabilities":{"0":0.25,"1":0.75},"confidence":0.5}}}"#,
     );
     let output = post_stdin(&format!("http://{address}/decision"), score_request);
     let _ = handle.join();
@@ -1288,6 +1281,91 @@ fn retryable_and_other_statuses_use_distinct_exit_codes() {
     assert_status(404, 7, "The endpoint returned non-retryable status 404.\n");
     assert_status(401, 7, "The endpoint returned non-retryable status 401.\n");
     assert_status(403, 7, "The endpoint returned non-retryable status 403.\n");
+    assert_status(400, 7, "The endpoint returned non-retryable status 400.\n");
+    assert_status(413, 7, "The endpoint returned non-retryable status 413.\n");
+    assert_status(415, 7, "The endpoint returned non-retryable status 415.\n");
+}
+
+#[test]
+fn unknown_response_fields_are_dropped() {
+    let response = br#"{"model":"demo","trace":"TOP-LEVEL-MARKER","answers":{"eligible":{"type":"noul","noul":0.25,"note":"ANSWER-MARKER"}},"usage":{"input_tokens":4,"output_tokens":0}}"#;
+    let (address, handle) = serve(200, "Content-Type: application/json\r\n", response);
+    let output = post_stdin(&format!("http://{address}/decision"), REQUEST_DOCUMENT);
+    let captured = handle.join().expect("server thread");
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    assert!(!stdout.contains("TOP-LEVEL-MARKER"));
+    assert!(!stdout.contains("ANSWER-MARKER"));
+    assert!(!stdout.contains("trace"));
+    assert!(!stdout.contains("note"));
+    assert!(stdout.contains("\"output_tokens\":0"));
+    assert!(stdout.contains("\"noul\":0.25"));
+    let (headers, _) = split_http(&captured);
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("accept-encoding: identity"));
+    assert!(headers
+        .to_ascii_lowercase()
+        .contains("accept: application/json"));
+}
+
+#[test]
+fn content_encoding_other_than_identity_exits_5() {
+    let (address, handle) = serve(
+        200,
+        "Content-Type: application/json\r\nContent-Encoding: gzip\r\n",
+        b"ENCODING-BODY-MARKER",
+    );
+    let output = post_stdin(&format!("http://{address}/decision"), REQUEST_DOCUMENT);
+    let _ = handle.join();
+    assert_eq!(status_code(&output), 5);
+    let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
+    assert_eq!(stderr, "The response content encoding is not identity.\n");
+    assert!(!stderr.contains("ENCODING-BODY-MARKER"));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn score_is_an_anchor_index() {
+    let request = br#"{"model":"demo","state":"pending","questions":{"severity":{"type":"score","instructions":"How severe?","criteria":["low","mid","high"]}}}"#;
+    let (address, handle) = serve(
+        200,
+        "Content-Type: application/json\r\n",
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1.5,"legend":{"0":"low","2":"high"},"probabilities":{"0":0.25,"1":0.5,"2":0.25},"confidence":0.5}},"usage":{"input_tokens":3,"output_tokens":0}}"#,
+    );
+    let output = post_stdin(&format!("http://{address}/decision"), request);
+    let _ = handle.join();
+    assert_eq!(
+        status_code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"score\":1.5"));
+
+    assert_response(
+        request,
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":3,"legend":{"0":"low"},"probabilities":{"0":1},"confidence":1}}}"#,
+        5,
+        "The score is outside the anchor index range.\n",
+    );
+    assert_response(
+        request,
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"low":"text"},"probabilities":{"0":1},"confidence":1}}}"#,
+        5,
+        "A legend key is outside the anchor index range.\n",
+    );
+    assert_response(
+        request,
+        br#"{"model":"demo","answers":{"severity":{"type":"score","score":1,"legend":{"0":"low"},"probabilities":{"3":1},"confidence":1}}}"#,
+        5,
+        "A score probability key is outside the anchor index range.\n",
+    );
 }
 
 #[test]
