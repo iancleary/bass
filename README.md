@@ -213,4 +213,4 @@ Keep secrets out of `state`. The decision server receives `state`. The endpoint 
 
 ## Publication
 
-Version 0.0.1 on crates.io is the placeholder program. This source replaces that program. Publishing it requires a new version number. This tree does not publish.
+The version in this tree is 0.1.0. Version 0.0.1 on crates.io is the placeholder program. 0.1.0 is the first version after that placeholder, and it stays below 1.0. That choice is inferred. This tree does not tag or publish.
